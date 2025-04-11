@@ -26,6 +26,9 @@ python -m venv wave
 # Activate the virtual environment
 source wave/bin/activate
 
+# Upgrade pip
+pip install --upgrade pip
+
 # Install dependencies
 pip install -r requirements.txt
 ```
