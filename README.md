@@ -20,6 +20,12 @@ The implementation leverages:
 git clone https://github.com/andrewtkent/humanoid-wave-rl.git
 cd humanoid-wave-rl
 
+# Create a virtual environment called 'wave'
+python -m venv wave
+
+# Activate the virtual environment
+source wave/bin/activate
+
 # Install dependencies
 pip install -r requirements.txt
 ```
