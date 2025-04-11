@@ -1,26 +1,17 @@
-# Humanoid Wave RL
+# Stand and Wave
 
-Train a humanoid robot to stand up and wave using reinforcement learning.
-
-![Humanoid Waving Demo](assets/humanoid_wave.gif)
+Train a humanoid to stand up and wave using reinforcement learning.
 
 ## Project Overview
 
-This project trains a humanoid robot to perform two sequential tasks:
+This project implements a reinforcement learning solution to teach a humanoid robot two sequential tasks:
 1. Stand up and maintain balance
-2. Wave with one arm while maintaining standing position
+2. Wave with one arm while maintaining a standing position
 
-The implementation uses:
-- **dm_control**: For the physics-based humanoid environment
-- **stable-baselines3**: For the PPO (Proximal Policy Optimization) implementation
-- **Gymnasium**: For standardized environment interfaces
-
-## Key Features
-
-- Custom wrapper to convert dm_control environments to Gymnasium format
-- Reward shaping to encourage both standing and waving behavior
-- Curriculum learning approach that prioritizes standing before waving
-- Visualization tools for monitoring training progress and recording videos
+The implementation leverages:
+- **dm_control** for the physics-based humanoid environment
+- **stable-baselines3** for the Proximal Policy Optimization (PPO) algorithm
+- **Gymnasium** as the standardized environment interface
 
 ## Installation
 
@@ -30,8 +21,6 @@ git clone https://github.com/yourusername/humanoid-wave-rl.git
 cd humanoid-wave-rl
 
 # Install dependencies
-pip install -e .
-# or
 pip install -r requirements.txt
 ```
 
@@ -42,74 +31,45 @@ pip install -r requirements.txt
 ```bash
 # Train with default parameters
 python main.py
-
-# Or run the training script directly with custom parameters
-python scripts/train.py --timesteps 2000000 --learning_rate 3e-4
 ```
 
 ### Evaluation
 
 ```bash
-# Evaluate trained model
-python scripts/evaluate.py --model_path results/model.zip
-
-# Record a video of the trained agent
-python scripts/record_video.py --model_path results/model.zip
+# Evaluate and record video of the trained model
+python main.py --model_path results/humanoid_wave_final.zip --mode evaluate
 ```
 
-## Approach & Design Decisions
+## Approach
 
 ### Environment Wrapper
 
-The project includes a custom wrapper that converts the dm_control humanoid environment to be compatible with stable-baselines3. The wrapper:
-
-- Flattens the dictionary-based observation space into a single vector
-- Defines appropriate Gymnasium spaces for observations and actions
-- Implements a custom reward function for the waving behavior
+The project includes a custom wrapper that converts the dm_control humanoid environment to be compatible with stable-baselines3, including:
+- Converting observations to a flat vector
+- Handling step and reset functions
+- Implementing the reward shaping for waving behavior
 
 ### Reward Design
 
 The reward function combines:
 
-1. **Standing Reward**: The original reward from the dm_control environment
-2. **Wave Reward**: A custom reward that detects oscillatory arm movements
-   - Tracks shoulder joint position and movement
-   - Rewards direction changes when the arm is elevated
-   - Provides continuous reward for maintaining the arm in an elevated position
+1. **Standing Reward**: The original reward from dm_control
+2. **Wave Reward**: A custom reward that encourages arm movement
+   - Tracks specific arm joint positions
+   - Rewards oscillatory movement when the arm is elevated
+   - Uses curriculum learning to balance standing and waving
 
-### Curriculum Learning
+## Design Decisions
 
-To manage the complexity of learning both tasks:
+1. **Right Arm Joint Selection**: Joints 5-7 were selected based on experimental observation of the humanoid model. These appear to control shoulder and elbow movement.
 
-- Initially prioritizes the standing reward
-- Gradually introduces the waving reward component
-- Uses a progress factor to balance rewards over time
+2. **Curriculum Learning**: The waving reward is gradually introduced after the agent learns to stand, using a progress factor that increases over time.
+
+3. **Wave Definition**: A "wave" is defined as oscillatory movement of the arm while it's held in an elevated position.
 
 ## Results
 
-After training for 1 million timesteps, the agent successfully:
+After training for approximately 1 million timesteps, the agent successfully:
 - Stands up and maintains balance
 - Raises its right arm
-- Performs a waving motion with the raised arm
-
-Training metrics show:
-- Standing reward stabilized after approximately 300K timesteps
-- Waving behavior emerged around 500K timesteps
-- Combined performance plateaued around 800K timesteps
-
-## Future Improvements
-
-- Experiment with different arm joints for more natural waving
-- Implement different waving styles (side-to-side vs up-down)
-- Try different RL algorithms beyond PPO
-- Add more complex behaviors like walking and waving simultaneously
-- Implement multi-task learning for a variety of gestures
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- The DeepMind Control Suite for the humanoid environment
-- The stable-baselines3 team for their implementation of PPO
+- Performs a consistent waving motion
