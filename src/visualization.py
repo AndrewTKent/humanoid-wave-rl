@@ -107,63 +107,61 @@ def record_video(env, model, video_path="humanoid_wave.mp4", num_frames=500):
     return video_path
 
 
-def record_waving_closeup(env, model, video_path="humanoid_wave_closeup.mp4", num_frames=300):
-    """
-    Record a video focused specifically on the waving motion.
+def record_closeup_video_headless(model_path, output_path, num_frames=500):
+    """Record a close-up video focused on the waving action"""
+    print(f"Loading model from {model_path}")
+    model = PPO.load(model_path)
     
-    This creates a closer view of the upper body to highlight the waving.
+    print(f"Recording close-up video to {output_path}...")
     
-    Args:
-        env: Environment to record from
-        model: Trained model to control the humanoid
-        video_path: Path to save the video
-        num_frames: Number of frames to record
-    """
-    print(f"Recording close-up waving video to {video_path}...")
+    # Regular environment for action prediction
+    env = DMCWrapper()
     
-    # Create a policy function that uses the trained model
-    def policy_fn(time_step):
-        obs = env._flatten_obs(time_step.observation)
-        action, _ = model.predict(obs, deterministic=True)
-        return action
+    # Environment with rendering capabilities
+    render_env = suite.load(domain_name="humanoid", task_name="stand")
+    render_env = pixels.Wrapper(render_env)
     
-    # Use dm_control's viewer to render frames
+    # Reset environments
+    obs, _ = env.reset()
+    time_step = render_env.reset()
+    
     frames = []
     
-    # Configure the camera for upper body close-up view
-    camera_settings = {
-        'distance': 3.0,       # Closer to the subject
-        'azimuth': 30.0,       # From the side to see arm movement
-        'elevation': -5.0,     # Slightly from above
-        'lookat': [0, 0, 1.2]  # Focus on upper body
-    }
+    # Let the humanoid stabilize before recording
+    for _ in range(100):
+        action, _ = model.predict(obs, deterministic=True)
+        obs, _, done, _, _ = env.step(action)
+        time_step = render_env.step(action)
+        if done:
+            obs, _ = env.reset()
+            time_step = render_env.reset()
     
-    with viewer.launch_passive(env.env, policy=policy_fn) as viewer_instance:
-        # Set up the camera
-        viewer_instance.camera.set_params(**camera_settings)
+    for i in range(num_frames):
+        if i % 100 == 0:
+            print(f"  Rendering frame {i+1}/{num_frames}")
         
-        # Warm-up period - let the humanoid stabilize before recording
-        for _ in range(100):
-            viewer_instance.step()
+        # Get action from model
+        action, _ = model.predict(obs, deterministic=True)
         
-        # Record frames
-        for i in range(num_frames):
-            if i % 50 == 0:
-                print(f"  Rendering frame {i+1}/{num_frames}")
-            
-            viewer_instance.step()
-            
-            # HD resolution for better quality
-            pixels = viewer_instance.render(height=720, width=1280, camera_id=0)
-            frames.append(pixels)
+        # Step environments
+        obs, reward, done, _, _ = env.step(action)
+        time_step = render_env.step(action)
+        
+        # Get frame with camera focused on upper body
+        # The camera_id=1 often gives a closer view
+        frame = render_env.physics.render(
+            height=720, 
+            width=1280, 
+            camera_id=1
+        )
+        frames.append(frame)
+        
+        # Reset if done
+        if done:
+            obs, _ = env.reset()
+            time_step = render_env.reset()
     
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(os.path.abspath(video_path)), exist_ok=True)
-    
-    # Save frames as video with higher quality
-    print(f"Saving video to {video_path}...")
-    imageio.mimsave(video_path, frames, fps=30, quality=8, macro_block_size=16)
-    print(f"Video saved successfully!")
-    
-    # Return the path to the saved video
-    return video_path
+    # Save the video
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    imageio.mimsave(output_path, frames, fps=30)
+    print(f"Video saved to {output_path}")
