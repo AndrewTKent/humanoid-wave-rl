@@ -17,7 +17,7 @@ The implementation leverages:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/humanoid-wave-rl.git
+git clone https://github.com/andrewtkent/humanoid-wave-rl.git
 cd humanoid-wave-rl
 
 # Install dependencies
