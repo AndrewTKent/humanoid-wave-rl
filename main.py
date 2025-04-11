@@ -18,12 +18,13 @@ from src.visualization import evaluate_model, record_video, record_closeup_video
 
 class ProgressCallback(BaseCallback):
     """
-    Custom callback for printing training progress as percentage.
+    Custom callback for printing training progress as percentage and estimated time.
     """
     def __init__(self, total_timesteps, verbose=0):
         super(ProgressCallback, self).__init__(verbose)
         self.total_timesteps = total_timesteps
         self.last_percent = -1
+        self.start_time = time.time()
     
     def _on_step(self):
         """Called after each step of the environment"""
@@ -32,7 +33,22 @@ class ProgressCallback(BaseCallback):
         
         # Only print when percentage changes by at least 1%
         if percent > self.last_percent:
-            print(f"Progress: {percent}% ({self.num_timesteps}/{self.total_timesteps} timesteps)")
+            # Calculate elapsed time and estimate remaining time
+            elapsed_time = time.time() - self.start_time
+            if self.num_timesteps > 0:
+                time_per_step = elapsed_time / self.num_timesteps
+                remaining_steps = self.total_timesteps - self.num_timesteps
+                remaining_time = remaining_steps * time_per_step
+                
+                # Format times as hours:minutes:seconds
+                elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed_time))
+                remaining_str = time.strftime("%H:%M:%S", time.gmtime(remaining_time))
+                
+                print(f"Progress: {percent}% ({self.num_timesteps}/{self.total_timesteps} timesteps) | Elapsed: {elapsed_str} | Remaining: {remaining_str}")
+            else:
+                # Avoid division by zero at first step
+                print(f"Progress: {percent}% ({self.num_timesteps}/{self.total_timesteps} timesteps) | Just started")
+            
             self.last_percent = percent
         
         return True
