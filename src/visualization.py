@@ -59,8 +59,7 @@ def evaluate_model(env, model, num_episodes=3):
 
 def record_video(env, model, video_path="humanoid_wave.mp4", num_frames=500):
     """
-    Record a video of the humanoid controlled by the trained model without visualization.
-    Works on headless servers by using OSMesa software rendering.
+    Record a video of the humanoid controlled by the trained model.
     
     Args:
         env: Environment to record from
@@ -68,50 +67,28 @@ def record_video(env, model, video_path="humanoid_wave.mp4", num_frames=500):
         video_path: Path to save the video
         num_frames: Number of frames to record
     """
-    import os
-    import numpy as np
-    import imageio
-    
-    # Set environment variable for MuJoCo to use OSMesa
-    os.environ['MUJOCO_GL'] = 'osmesa'
-    
     print(f"Recording video to {video_path}...")
     
-    # Create new environment for rendering
-    # This avoids interfering with the original environment
-    render_env = env.env
-    
-    # Set up camera
-    camera_id = 0  # Use the default free camera
-    height = 480
-    width = 640
-    
-    # Initialize
-    frames = []
-    timestep = render_env.reset()
-    
-    # Record frames
-    for i in range(num_frames):
-        if i % 100 == 0:
-            print(f"  Rendering frame {i+1}/{num_frames}")
-        
-        # Get observation and predict action using model
-        obs = env._flatten_obs(timestep.observation)
+    # Create a policy function that uses the trained model
+    def policy_fn(time_step):
+        obs = env._flatten_obs(time_step.observation)
         action, _ = model.predict(obs, deterministic=True)
-        
-        # Step the environment
-        timestep = render_env.step(action)
-        
-        # Render frame
-        pixels = render_env.physics.render(height=height, width=width, camera_id=camera_id)
-        frames.append(pixels)
-        
-        # Check if episode is done
-        if timestep.last():
-            timestep = render_env.reset()
+        return action
+    
+    # Use dm_control's viewer to render frames
+    frames = []
+    with viewer.launch_passive(env.env, policy=policy_fn) as viewer_instance:
+        # Record frames
+        for i in range(num_frames):
+            if i % 100 == 0:
+                print(f"  Rendering frame {i+1}/{num_frames}")
+            
+            viewer_instance.step()
+            pixels = viewer_instance.render(height=480, width=640)
+            frames.append(pixels)
     
     # Ensure directory exists
-    os.makedirs(os.path.dirname(os.path.abspath(video_path)) or '.', exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(video_path)), exist_ok=True)
     
     # Save frames as video
     print(f"Saving video to {video_path}...")
