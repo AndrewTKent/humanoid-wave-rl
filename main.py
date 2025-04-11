@@ -33,7 +33,7 @@ class ProgressCallback(BaseCallback):
         percent = round(100 * self.num_timesteps / self.total_timesteps, 1)
         
         # Only print when percentage changes by at least 0.1%
-        if percent > self.last_percent + 0.009:  # Use 0.09 to account for float precision
+        if percent > self.last_percent + 0.09:  # Use 0.09 to account for float precision
             # Calculate elapsed time and estimate remaining time
             elapsed_time = time.time() - self.start_time
             if self.num_timesteps > 0:
