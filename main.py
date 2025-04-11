@@ -9,11 +9,33 @@ from datetime import datetime
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_checker import check_env
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 
 from src.dmc_wrapper import DMCWrapper
-from src.visualization import evaluate_model, record_video
+from src.visualization import evaluate_model, record_video, record_waving_closeup
+
+
+class ProgressCallback(BaseCallback):
+    """
+    Custom callback for printing training progress as percentage.
+    """
+    def __init__(self, total_timesteps, verbose=0):
+        super(ProgressCallback, self).__init__(verbose)
+        self.total_timesteps = total_timesteps
+        self.last_percent = -1
+    
+    def _on_step(self):
+        """Called after each step of the environment"""
+        # Calculate percentage
+        percent = int(100 * self.num_timesteps / self.total_timesteps)
+        
+        # Only print when percentage changes by at least 1%
+        if percent > self.last_percent:
+            print(f"Progress: {percent}% ({self.num_timesteps}/{self.total_timesteps} timesteps)")
+            self.last_percent = percent
+        
+        return True
 
 
 def parse_args():
@@ -80,6 +102,9 @@ def train_humanoid_wave(total_timesteps=1000000, output_dir='results', num_envs=
         name_prefix="humanoid_wave"
     )
     
+    # Set up progress callback
+    progress_callback = ProgressCallback(total_timesteps)
+    
     # Create the model
     model = PPO(
         "MlpPolicy",
@@ -99,7 +124,7 @@ def train_humanoid_wave(total_timesteps=1000000, output_dir='results', num_envs=
     print(f"Progress will be shown as iterations, where each iteration processes")
     print(f"{num_envs * model.n_steps} timesteps ({num_envs} envs * {model.n_steps} steps)")
     
-    model.learn(total_timesteps=total_timesteps, callback=checkpoint_callback)
+    model.learn(total_timesteps=total_timesteps, callback=[checkpoint_callback, progress_callback])
     
     # Save the final model
     final_model_path = os.path.join(output_dir, "humanoid_wave_final.zip")
@@ -112,9 +137,18 @@ def train_humanoid_wave(total_timesteps=1000000, output_dir='results', num_envs=
     # Evaluate the model
     evaluate_model(eval_env, model)
     
-    # Record a video
+    # Record videos
+    print("Recording videos of the trained humanoid...")
     video_path = os.path.join(output_dir, f"humanoid_wave_{timestamp}.mp4")
     record_video(eval_env, model, video_path)
+    
+    # Record a close-up of the waving motion
+    closeup_path = os.path.join(output_dir, f"humanoid_wave_closeup_{timestamp}.mp4")
+    record_waving_closeup(eval_env, model, closeup_path)
+    
+    print(f"Training and evaluation complete.")
+    print(f"Full video: {video_path}")
+    print(f"Close-up video: {closeup_path}")
     
     return model
 
@@ -146,10 +180,20 @@ def main():
         # Evaluate
         evaluate_model(env, model)
         
-        # Record video
+        # Record videos
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        print("Recording videos of the trained humanoid...")
         video_path = os.path.join(args.output_dir, f"humanoid_wave_{timestamp}.mp4")
         record_video(env, model, video_path)
+        
+        # Record a close-up of the waving motion
+        closeup_path = os.path.join(args.output_dir, f"humanoid_wave_closeup_{timestamp}.mp4")
+        record_waving_closeup(env, model, closeup_path)
+        
+        print(f"Evaluation complete.")
+        print(f"Full video: {video_path}")
+        print(f"Close-up video: {closeup_path}")
 
 
 if __name__ == "__main__":
