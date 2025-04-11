@@ -1,8 +1,5 @@
 """
 DMC Wrapper for Humanoid Environment.
-
-This module provides a wrapper that converts dm_control environments 
-to be compatible with Gymnasium interface.
 """
 
 import gymnasium as gym
@@ -11,23 +8,11 @@ from dm_control import suite
 
 
 class DMCWrapper(gym.Env):
-    """
-    Wrapper for dm_control environments to make them compatible with Gymnasium.
+    """Wrapper for dm_control environments to make them compatible with Gymnasium."""
     
-    This wrapper specifically supports the humanoid standing task and adds
-    custom reward shaping for a waving behavior.
-    """
-    
-    def __init__(self, domain_name="humanoid", task_name="stand"):
-        """
-        Initialize the DMC wrapper.
-        
-        Args:
-            domain_name (str): The domain name in dm_control suite
-            task_name (str): The task name in dm_control suite
-        """
+    def __init__(self):
         # Load the environment
-        self.env = suite.load(domain_name=domain_name, task_name=task_name)
+        self.env = suite.load(domain_name="humanoid", task_name="stand")
         
         # Get observation specs and determine total dimensions
         obs_spec = self.env.observation_spec()
@@ -56,21 +41,10 @@ class DMCWrapper(gym.Env):
         self.direction_changes = 0
         
         # Identify right arm joints (based on humanoid model experimentation)
-        # These indices control the right arm movement in the humanoid model
         self.right_arm_joint_indices = [5, 6, 7]  # Shoulder and elbow joints
         
     def reset(self, seed=None, options=None):
-        """
-        Reset the environment and return the initial observation.
-        
-        Args:
-            seed (int, optional): Random seed
-            options (dict, optional): Additional options
-            
-        Returns:
-            observation (np.ndarray): Initial observation
-            info (dict): Additional information
-        """
+        """Reset the environment and return the initial observation."""
         if seed is not None:
             # Set random seed if provided
             super().reset(seed=seed)
@@ -88,19 +62,7 @@ class DMCWrapper(gym.Env):
         return self._flatten_obs(time_step.observation), {}
         
     def step(self, action):
-        """
-        Take a step in the environment.
-        
-        Args:
-            action (np.ndarray): Action to take
-            
-        Returns:
-            observation (np.ndarray): New observation
-            reward (float): Reward for this step
-            done (bool): Whether the episode is done
-            truncated (bool): Whether the episode was truncated
-            info (dict): Additional information
-        """
+        """Take a step in the environment."""
         # Execute action in the dm_control environment
         time_step = self.env.step(action)
         
@@ -135,15 +97,7 @@ class DMCWrapper(gym.Env):
         return obs, total_reward, done, truncated, info
         
     def _flatten_obs(self, obs_dict):
-        """
-        Flatten the observation dictionary into a 1D numpy array.
-        
-        Args:
-            obs_dict (dict): Observation dictionary from dm_control
-            
-        Returns:
-            np.ndarray: Flattened observation vector
-        """
+        """Flatten the observation dictionary into a 1D numpy array."""
         # Concatenate all observation values into a single vector
         return np.concatenate([
             np.array(v, dtype=np.float32).flatten() 
@@ -151,15 +105,7 @@ class DMCWrapper(gym.Env):
         ])
     
     def _compute_wave_reward(self, observation):
-        """
-        Compute reward for wave-like motion of the right arm.
-        
-        Args:
-            observation (dict): Observation dictionary from dm_control
-            
-        Returns:
-            float: Wave reward value
-        """
+        """Compute reward for wave-like motion of the right arm."""
         # Extract right arm joint positions
         joint_angles = observation['joint_angles']
         arm_positions = joint_angles[self.right_arm_joint_indices]
