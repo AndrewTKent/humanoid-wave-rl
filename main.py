@@ -24,16 +24,16 @@ class ProgressCallback(BaseCallback):
     def __init__(self, total_timesteps, verbose=0):
         super(ProgressCallback, self).__init__(verbose)
         self.total_timesteps = total_timesteps
-        self.last_percent = -1
+        self.last_percent = -0.1  # Initialize to -0.1 to print at 0.0%
         self.start_time = time.time()
     
     def _on_step(self):
         """Called after each step of the environment"""
-        # Calculate percentage
-        percent = int(100 * self.num_timesteps / self.total_timesteps)
+        # Calculate percentage with one decimal place
+        percent = round(100 * self.num_timesteps / self.total_timesteps, 1)
         
-        # Only print when percentage changes by at least 1%
-        if percent > self.last_percent:
+        # Only print when percentage changes by at least 0.1%
+        if percent > self.last_percent + 0.09:  # Use 0.09 to account for float precision
             # Calculate elapsed time and estimate remaining time
             elapsed_time = time.time() - self.start_time
             if self.num_timesteps > 0:
@@ -45,15 +45,14 @@ class ProgressCallback(BaseCallback):
                 elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed_time))
                 remaining_str = time.strftime("%H:%M:%S", time.gmtime(remaining_time))
                 
-                print(f"Progress: {percent}% ({self.num_timesteps}/{self.total_timesteps} timesteps) | Elapsed: {elapsed_str} | Remaining: {remaining_str}")
+                print(f"Progress: {percent:.1f}% ({self.num_timesteps}/{self.total_timesteps} timesteps) | Elapsed: {elapsed_str} | Remaining: {remaining_str}")
             else:
                 # Avoid division by zero at first step
-                print(f"Progress: {percent}% ({self.num_timesteps}/{self.total_timesteps} timesteps) | Just started")
+                print(f"Progress: {percent:.1f}% ({self.num_timesteps}/{self.total_timesteps} timesteps) | Just started")
             
             self.last_percent = percent
         
         return True
-
 
 def parse_args():
     """Parse command line arguments."""
