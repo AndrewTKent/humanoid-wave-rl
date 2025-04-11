@@ -13,7 +13,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 
 from src.dmc_wrapper import DMCWrapper
-from src.visualization import evaluate_model, record_video, record_waving_closeup
+from src.visualization import evaluate_model, record_video, record_closeup_video_headless
 
 
 class ProgressCallback(BaseCallback):
@@ -144,7 +144,7 @@ def train_humanoid_wave(total_timesteps=1000000, output_dir='results', num_envs=
     
     # Record a close-up of the waving motion
     closeup_path = os.path.join(output_dir, f"humanoid_wave_closeup_{timestamp}.mp4")
-    record_waving_closeup(eval_env, model, closeup_path)
+    record_closeup_video_headless(eval_env, model, closeup_path)
     
     print(f"Training and evaluation complete.")
     print(f"Full video: {video_path}")
