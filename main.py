@@ -1,5 +1,5 @@
 """
-Main script for humanoid wave training and evaluation with GPU acceleration.
+Main script for humanoid wave training and evaluation with optimized performance.
 """
 
 import os
@@ -31,6 +31,9 @@ def parse_args():
                        help='Directory to save results')
     parser.add_argument('--num_envs', type=int, default=16,
                        help='Number of parallel environments')
+    parser.add_argument('--device', type=str, default='auto',
+                       choices=['auto', 'cpu', 'cuda'],
+                       help='Device to run on (auto, cpu, or cuda)')
     
     return parser.parse_args()
 
@@ -42,16 +45,23 @@ def make_env():
     return _init
 
 
-def train_humanoid_wave(total_timesteps=1000000, output_dir='results', num_envs=16):
-    """Train the humanoid to stand and wave with GPU acceleration and parallel environments."""
-    # Check for GPU availability
-    if torch.cuda.is_available():
-        device = "cuda"
+def train_humanoid_wave(total_timesteps=1000000, output_dir='results', num_envs=16, device='auto'):
+    """Train the humanoid to stand and wave with parallel environments."""
+    # Determine device
+    if device == 'auto':
+        if torch.cuda.is_available():
+            print("CUDA is available, but training may be faster on CPU for MlpPolicy.")
+            print("You can force CPU usage with --device cpu or continue with GPU.")
+            device = "cuda"  # Still use CUDA by default
+        else:
+            device = "cpu"
+    
+    print(f"Using device: {device}")
+    if device == "cuda" and torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
-        print(f"Using {num_gpus} GPU(s) for training")
-    else:
-        device = "cpu"
-        print("No GPU detected, using CPU for training")
+        for i in range(num_gpus):
+            gpu_name = torch.cuda.get_device_name(i)
+            print(f"  GPU {i}: {gpu_name}")
     
     # Create vectorized environment with multiple parallel instances
     print(f"Creating {num_envs} parallel environments...")
@@ -70,22 +80,25 @@ def train_humanoid_wave(total_timesteps=1000000, output_dir='results', num_envs=
         name_prefix="humanoid_wave"
     )
     
-    # Create the model with optimized parameters for GPU acceleration
+    # Create the model
     model = PPO(
         "MlpPolicy",
         env,
         verbose=1,
         learning_rate=3e-4,
         n_steps=2048,
-        batch_size=256,  # Larger batch size for better GPU utilization
+        batch_size=64 if device == "cpu" else 256,  # Smaller for CPU, larger for GPU
         n_epochs=10,
         gamma=0.99,
-        device=device,  # Use GPU if available
-        policy_kwargs={"net_arch": [256, 256]}  # Larger network for better parallelization
+        device=device,
+        policy_kwargs={"net_arch": [256, 256]}  # Deep network architecture
     )
     
     # Train the model
     print(f"Training for {total_timesteps} timesteps...")
+    print(f"Progress will be shown as iterations, where each iteration processes")
+    print(f"{num_envs * model.n_steps} timesteps ({num_envs} envs * {model.n_steps} steps)")
+    
     model.learn(total_timesteps=total_timesteps, callback=checkpoint_callback)
     
     # Save the final model
@@ -115,7 +128,8 @@ def main():
         train_humanoid_wave(
             total_timesteps=args.total_timesteps,
             output_dir=args.output_dir,
-            num_envs=args.num_envs
+            num_envs=args.num_envs,
+            device=args.device
         )
     
     elif args.mode == 'evaluate':
