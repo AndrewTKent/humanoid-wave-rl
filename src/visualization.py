@@ -57,63 +57,53 @@ def evaluate_model(env, model, num_episodes=3):
     print(f"  Mean Wave Reward: {np.mean(all_wave_rewards):.2f}")
 
 
+
 def record_video(env, model, video_path="humanoid_wave.mp4", num_frames=500):
     """
-    Record a video of the humanoid controlled by the trained model.
-    
-    Args:
-        env: Environment to record from
-        model: Trained model to control the humanoid
-        video_path: Path to save the video
-        num_frames: Number of frames to record
+    Record a video of the humanoid in a headless environment.
     """
     print(f"Recording video to {video_path}...")
     
-    # Create a policy function that uses the trained model
-    def policy_fn(time_step):
-        obs = env._flatten_obs(time_step.observation)
-        action, _ = model.predict(obs, deterministic=True)
-        return action
+    # Create an environment for recording
+    import numpy as np
+    import imageio
+    from dm_control import suite
+    from dm_control.suite.wrappers import pixels
+
+    # Create environment with pixel rendering enabled
+    env_with_pixels = suite.load(domain_name="humanoid", task_name="stand")
+    env_with_pixels = pixels.Wrapper(env_with_pixels, render_kwargs={'height': 480, 'width': 640})
     
-    # Use dm_control's viewer to render frames
+    # Reset environment
+    time_step = env_with_pixels.reset()
     frames = []
     
-    # Configure the camera for better viewing angle
-    camera_settings = {
-        'distance': 5.0,      # Distance from the subject
-        'azimuth': 45.0,      # Horizontal rotation (to see the wave from an angle)
-        'elevation': -10.0,   # Vertical elevation (slightly from above)
-        'lookat': [0, 0, 1.0] # Look at position (approximately at head height)
-    }
-    
-    with viewer.launch_passive(env.env, policy=policy_fn) as viewer_instance:
-        # Set up the camera
-        viewer_instance.camera.set_params(**camera_settings)
+    for i in range(num_frames):
+        if i % 100 == 0:
+            print(f"  Rendering frame {i+1}/{num_frames}")
         
-        # Warm-up period - let the humanoid stabilize before recording
-        for _ in range(50):
-            viewer_instance.step()
+        # Convert observation for policy
+        obs = env._flatten_obs(time_step.observation)
         
-        # Record frames
-        for i in range(num_frames):
-            if i % 100 == 0:
-                print(f"  Rendering frame {i+1}/{num_frames}")
-            
-            viewer_instance.step()
-            
-            # For better quality video
-            pixels = viewer_instance.render(height=720, width=1280, camera_id=0)
-            frames.append(pixels)
+        # Get action from model
+        action, _ = model.predict(obs, deterministic=True)
+        
+        # Step the environment
+        time_step = env_with_pixels.step(action)
+        
+        # Render and store frame
+        pixels = env_with_pixels.physics.render(height=480, width=640, camera_id=0)
+        frames.append(pixels)
+        
+        # Check if episode is done
+        if time_step.last():
+            time_step = env_with_pixels.reset()
     
-    # Ensure directory exists
+    # Save the video
     os.makedirs(os.path.dirname(os.path.abspath(video_path)), exist_ok=True)
+    imageio.mimsave(video_path, frames, fps=30)
+    print(f"Video saved to {video_path}")
     
-    # Save frames as video with higher quality
-    print(f"Saving video to {video_path}...")
-    imageio.mimsave(video_path, frames, fps=30, quality=8, macro_block_size=16)
-    print(f"Video saved successfully!")
-    
-    # Return the path to the saved video
     return video_path
 
 
