@@ -1,6 +1,6 @@
 # Stand and Wave
 
-Train a humanoid to stand up and wave using reinforcement learning.
+Train a humanoid to stand up and wave using reinforcement learning with GPU acceleration.
 
 ## Project Overview
 
@@ -9,9 +9,10 @@ This project implements a reinforcement learning solution to teach a humanoid ro
 2. Wave with one arm while maintaining a standing position
 
 The implementation leverages:
-- **dm_control** for the physics-based humanoid environment
-- **stable-baselines3** for the Proximal Policy Optimization (PPO) algorithm
-- **Gymnasium** as the standardized environment interface
+- **dm_control**: For the physics-based humanoid environment
+- **stable-baselines3**: For the Proximal Policy Optimization (PPO) algorithm
+- **Gymnasium**: For standardized environment interfaces
+- **GPU Acceleration**: For faster training with parallel environments
 
 ## Installation
 
@@ -38,16 +39,27 @@ pip install -r requirements.txt
 ### Training
 
 ```bash
-# Train with default parameters
+# Train with default parameters (16 parallel environments)
 python main.py
+
+# Train with custom settings
+python main.py --total_timesteps 2000000 --num_envs 32
 ```
 
 ### Evaluation
 
 ```bash
 # Evaluate and record video of the trained model
-python main.py --model_path results/humanoid_wave_final.zip --mode evaluate
+python main.py --mode evaluate --model_path results/humanoid_wave_final.zip
 ```
+
+## Performance Optimization
+
+The implementation includes several optimizations for better performance:
+
+1. **Vectorized Environments**: Runs multiple environments in parallel to maximize throughput
+2. **GPU Acceleration**: Uses CUDA for neural network computation when available
+3. **Optimized Hyperparameters**: Batch size and network architecture tuned for GPU performance
 
 ## Approach
 
@@ -75,6 +87,8 @@ The reward function combines:
 2. **Curriculum Learning**: The waving reward is gradually introduced after the agent learns to stand, using a progress factor that increases over time.
 
 3. **Wave Definition**: A "wave" is defined as oscillatory movement of the arm while it's held in an elevated position.
+
+4. **Parallel Training**: Using multiple environments in parallel significantly speeds up training.
 
 ## Results
 
