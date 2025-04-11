@@ -1,145 +1,118 @@
 """
-DMC Wrapper for Humanoid Environment.
+Main script for humanoid wave training and evaluation.
 """
 
-import gymnasium as gym
-import numpy as np
-from dm_control import suite
+import os
+import argparse
+from datetime import datetime
+
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.callbacks import CheckpointCallback
+
+from src.dmc_wrapper import DMCWrapper
+from src.visualization import evaluate_model, record_video
 
 
-class DMCWrapper(gym.Env):
-    """Wrapper for dm_control environments to make them compatible with Gymnasium."""
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Humanoid Wave Training')
     
-    def __init__(self):
-        # Load the environment
-        self.env = suite.load(domain_name="humanoid", task_name="stand")
-        
-        # Get observation specs and determine total dimensions
-        obs_spec = self.env.observation_spec()
-        total_obs_dim = int(sum(np.prod(spec.shape) for spec in obs_spec.values()))
-        
-        # Define the observation space (continuous vector of all observations combined)
-        self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(total_obs_dim,), dtype=np.float32
-        )
-        
-        # Get action specs
-        action_spec = self.env.action_spec()
-        
-        # Define the action space
-        self.action_space = gym.spaces.Box(
-            low=action_spec.minimum.astype(np.float32),
-            high=action_spec.maximum.astype(np.float32),
-            shape=action_spec.shape,
-            dtype=np.float32
-        )
-        
-        # Keep track of arm position for waving detection
-        self.prev_arm_positions = None
-        self.prev_delta = 0.0
-        self.wave_counter = 0
-        self.direction_changes = 0
-        
-        # Identify right arm joints (based on humanoid model experimentation)
-        self.right_arm_joint_indices = [5, 6, 7]  # Shoulder and elbow joints
-        
-    def reset(self, seed=None, options=None):
-        """Reset the environment and return the initial observation."""
-        if seed is not None:
-            # Set random seed if provided
-            super().reset(seed=seed)
-            
-        # Reset the dm_control environment
-        time_step = self.env.reset()
-        
-        # Reset wave tracking variables
-        self.prev_arm_positions = None
-        self.prev_delta = 0.0
-        self.wave_counter = 0
-        self.direction_changes = 0
-        
-        # Return flattened observation and empty info dict (gym standard)
-        return self._flatten_obs(time_step.observation), {}
-        
-    def step(self, action):
-        """Take a step in the environment."""
-        # Execute action in the dm_control environment
-        time_step = self.env.step(action)
-        
-        # Get flattened observation
-        obs = self._flatten_obs(time_step.observation)
-        
-        # Get the stand reward (or 0 if None)
-        stand_reward = float(time_step.reward) if time_step.reward is not None else 0.0
-        
-        # Calculate wave reward
-        wave_reward = self._compute_wave_reward(time_step.observation)
-        
-        # Combine rewards with appropriate weights
-        # Initially prioritize standing, then gradually add waving reward
-        progress_factor = min(1.0, self.wave_counter / 1000)  # Curriculum learning
-        total_reward = stand_reward + 0.3 * progress_factor * wave_reward
-        
-        # Check if episode is done
-        done = time_step.last()
-        
-        # Additional info dict with reward components
-        info = {
-            'stand_reward': stand_reward,
-            'wave_reward': wave_reward
-        }
-        
-        # Gym requires both terminated and truncated flags
-        truncated = False
-        
-        self.wave_counter += 1
-        
-        return obs, total_reward, done, truncated, info
-        
-    def _flatten_obs(self, obs_dict):
-        """Flatten the observation dictionary into a 1D numpy array."""
-        # Concatenate all observation values into a single vector
-        return np.concatenate([
-            np.array(v, dtype=np.float32).flatten() 
-            for v in obs_dict.values()
-        ])
+    parser.add_argument('--mode', type=str, default='train',
+                       choices=['train', 'evaluate'], 
+                       help='Mode: train or evaluate')
+    parser.add_argument('--model_path', type=str, default=None,
+                       help='Path to saved model (for evaluation)')
+    parser.add_argument('--total_timesteps', type=int, default=1000000,
+                       help='Total timesteps for training')
+    parser.add_argument('--output_dir', type=str, default='results',
+                       help='Directory to save results')
     
-    def _compute_wave_reward(self, observation):
-        """Compute reward for wave-like motion of the right arm."""
-        # Extract right arm joint positions
-        joint_angles = observation['joint_angles']
-        arm_positions = joint_angles[self.right_arm_joint_indices]
+    return parser.parse_args()
+
+
+def train_humanoid_wave(total_timesteps=1000000, output_dir='results'):
+    """Train the humanoid to stand and wave."""
+    # Create the environment
+    env = DMCWrapper()
+    
+    # Verify the environment
+    check_env(env)
+    
+    # Create directories
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create timestamp for this run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Set up checkpoint callback
+    checkpoint_callback = CheckpointCallback(
+        save_freq=100000, 
+        save_path=os.path.join(output_dir, f"checkpoints_{timestamp}"),
+        name_prefix="humanoid_wave"
+    )
+    
+    # Create the model
+    model = PPO(
+        "MlpPolicy",
+        env,
+        verbose=1,
+        learning_rate=3e-4,
+        n_steps=2048,
+        batch_size=64,
+        n_epochs=10,
+        gamma=0.99
+    )
+    
+    # Train the model
+    print(f"Training for {total_timesteps} timesteps...")
+    model.learn(total_timesteps=total_timesteps, callback=checkpoint_callback)
+    
+    # Save the final model
+    final_model_path = os.path.join(output_dir, "humanoid_wave_final.zip")
+    model.save(final_model_path)
+    print(f"Model saved to {final_model_path}")
+    
+    # Evaluate the model
+    evaluate_model(env, model)
+    
+    # Record a video
+    video_path = os.path.join(output_dir, f"humanoid_wave_{timestamp}.mp4")
+    record_video(env, model, video_path)
+    
+    return model
+
+
+def main():
+    """Main entry point."""
+    args = parse_args()
+    
+    if args.mode == 'train':
+        # Train mode
+        train_humanoid_wave(
+            total_timesteps=args.total_timesteps,
+            output_dir=args.output_dir
+        )
+    
+    elif args.mode == 'evaluate':
+        # Evaluation mode
+        if args.model_path is None:
+            raise ValueError("Model path must be provided for evaluation mode")
         
-        # Initialize wave reward
-        wave_reward = 0.0
+        # Load model
+        model = PPO.load(args.model_path)
         
-        # First time step, just store the position
-        if self.prev_arm_positions is None:
-            self.prev_arm_positions = arm_positions.copy()
-            self.prev_delta = 0.0
-            return wave_reward
+        # Create environment
+        env = DMCWrapper()
         
-        # Calculate joint movement (focus on shoulder joint)
-        shoulder_delta = arm_positions[0] - self.prev_arm_positions[0]
+        # Evaluate
+        evaluate_model(env, model)
         
-        # Detect direction change (essential for waving)
-        # We're looking for oscillatory movement
-        if self.prev_arm_positions[0] > 0.2:  # If arm is elevated
-            if (shoulder_delta > 0.05 and self.prev_delta < -0.05) or \
-               (shoulder_delta < -0.05 and self.prev_delta > 0.05):
-                # Direction changed significantly
-                self.direction_changes += 1
-                wave_reward += 1.0  # Reward for direction change while elevated
-        
-        # Reward for keeping arm elevated (above horizontal)
-        if arm_positions[0] > 0.3:
-            wave_reward += 0.2
-        
-        # Extra reward for multiple direction changes (sustained waving)
-        wave_reward += 0.1 * min(10, self.direction_changes)
-        
-        # Store current positions for next step
-        self.prev_arm_positions = arm_positions.copy()
-        self.prev_delta = shoulder_delta
-        
-        return wave_reward
+        # Record video
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_path = os.path.join(args.output_dir, f"humanoid_wave_{timestamp}.mp4")
+        record_video(env, model, video_path)
+
+
+if __name__ == "__main__":
+    main()
