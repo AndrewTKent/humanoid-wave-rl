@@ -77,20 +77,103 @@ def record_video(env, model, video_path="humanoid_wave.mp4", num_frames=500):
     
     # Use dm_control's viewer to render frames
     frames = []
+    
+    # Configure the camera for better viewing angle
+    camera_settings = {
+        'distance': 5.0,      # Distance from the subject
+        'azimuth': 45.0,      # Horizontal rotation (to see the wave from an angle)
+        'elevation': -10.0,   # Vertical elevation (slightly from above)
+        'lookat': [0, 0, 1.0] # Look at position (approximately at head height)
+    }
+    
     with viewer.launch_passive(env.env, policy=policy_fn) as viewer_instance:
+        # Set up the camera
+        viewer_instance.camera.set_params(**camera_settings)
+        
+        # Warm-up period - let the humanoid stabilize before recording
+        for _ in range(50):
+            viewer_instance.step()
+        
         # Record frames
         for i in range(num_frames):
             if i % 100 == 0:
                 print(f"  Rendering frame {i+1}/{num_frames}")
             
             viewer_instance.step()
-            pixels = viewer_instance.render(height=480, width=640)
+            
+            # For better quality video
+            pixels = viewer_instance.render(height=720, width=1280, camera_id=0)
             frames.append(pixels)
     
     # Ensure directory exists
     os.makedirs(os.path.dirname(os.path.abspath(video_path)), exist_ok=True)
     
-    # Save frames as video
+    # Save frames as video with higher quality
     print(f"Saving video to {video_path}...")
-    imageio.mimsave(video_path, frames, fps=30)
+    imageio.mimsave(video_path, frames, fps=30, quality=8, macro_block_size=16)
     print(f"Video saved successfully!")
+    
+    # Return the path to the saved video
+    return video_path
+
+
+def record_waving_closeup(env, model, video_path="humanoid_wave_closeup.mp4", num_frames=300):
+    """
+    Record a video focused specifically on the waving motion.
+    
+    This creates a closer view of the upper body to highlight the waving.
+    
+    Args:
+        env: Environment to record from
+        model: Trained model to control the humanoid
+        video_path: Path to save the video
+        num_frames: Number of frames to record
+    """
+    print(f"Recording close-up waving video to {video_path}...")
+    
+    # Create a policy function that uses the trained model
+    def policy_fn(time_step):
+        obs = env._flatten_obs(time_step.observation)
+        action, _ = model.predict(obs, deterministic=True)
+        return action
+    
+    # Use dm_control's viewer to render frames
+    frames = []
+    
+    # Configure the camera for upper body close-up view
+    camera_settings = {
+        'distance': 3.0,       # Closer to the subject
+        'azimuth': 30.0,       # From the side to see arm movement
+        'elevation': -5.0,     # Slightly from above
+        'lookat': [0, 0, 1.2]  # Focus on upper body
+    }
+    
+    with viewer.launch_passive(env.env, policy=policy_fn) as viewer_instance:
+        # Set up the camera
+        viewer_instance.camera.set_params(**camera_settings)
+        
+        # Warm-up period - let the humanoid stabilize before recording
+        for _ in range(100):
+            viewer_instance.step()
+        
+        # Record frames
+        for i in range(num_frames):
+            if i % 50 == 0:
+                print(f"  Rendering frame {i+1}/{num_frames}")
+            
+            viewer_instance.step()
+            
+            # HD resolution for better quality
+            pixels = viewer_instance.render(height=720, width=1280, camera_id=0)
+            frames.append(pixels)
+    
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(os.path.abspath(video_path)), exist_ok=True)
+    
+    # Save frames as video with higher quality
+    print(f"Saving video to {video_path}...")
+    imageio.mimsave(video_path, frames, fps=30, quality=8, macro_block_size=16)
+    print(f"Video saved successfully!")
+    
+    # Return the path to the saved video
+    return video_path
