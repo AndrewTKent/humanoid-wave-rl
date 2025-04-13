@@ -13,8 +13,8 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 
-from dmc_wrapper import DMCWrapper
-from visualization import evaluate_model, record_video
+from src.dmc_wrapper import DMCWrapper
+from src.visualization import evaluate_model, record_video
 
 
 class ProgressCallback(BaseCallback):
