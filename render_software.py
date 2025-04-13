@@ -11,7 +11,7 @@ from stable_baselines3 import PPO
 import mujoco
 
 # Import Wrapper class
-from dmc_wrapper import DMCWrapper
+from src.dmc_wrapper import DMCWrapper
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Render video of trained humanoid using software renderer')
