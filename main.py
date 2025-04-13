@@ -1,143 +1,217 @@
-import gymnasium as gym
-import numpy as np
-from dm_control import suite
+"""
+Main script for humanoid stand training and evaluation with optimized performance.
+"""
 
-class DMCWrapper(gym.Env):
-    """Wrapper for dm_control environments to make them compatible with Gymnasium."""
+import os
+import time
+import argparse
+import torch
+from datetime import datetime
+
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
+
+from src.dmc_wrapper import DMCWrapper
+from src.visualization import evaluate_model, record_video, record_closeup_video_headless
+
+
+class ProgressCallback(BaseCallback):
+    """
+    Custom callback for printing training progress as percentage and estimated time.
+    """
+    def __init__(self, total_timesteps, verbose=0):
+        super(ProgressCallback, self).__init__(verbose)
+        self.total_timesteps = total_timesteps
+        self.last_percent = -0.1  # Initialize to -0.1 to print at 0.0%
+        self.start_time = time.time()
     
-    def __init__(self, enable_waving=True):
-        # Load the environment
-        self.env = suite.load(domain_name="humanoid", task_name="stand")
+    def _on_step(self):
+        """Called after each step of the environment"""
+        # Calculate percentage with one decimal place
+        percent = round(100 * self.num_timesteps / self.total_timesteps, 1)
         
-        # Get observation specs and determine total dimensions
-        obs_spec = self.env.observation_spec()
-        total_obs_dim = int(sum(np.prod(spec.shape) for spec in obs_spec.values()))
-        
-        # Define the observation space (continuous vector of all observations combined)
-        self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(total_obs_dim,), dtype=np.float32
-        )
-        
-        # Get action specs
-        action_spec = self.env.action_spec()
-        
-        # Define the action space
-        self.action_space = gym.spaces.Box(
-            low=action_spec.minimum.astype(np.float32),
-            high=action_spec.maximum.astype(np.float32),
-            shape=action_spec.shape,
-            dtype=np.float32
-        )
-        
-        # Flag to enable/disable waving behavior
-        self.enable_waving = enable_waving
-        
-        # Initialize waving-related variables only if waving is enabled
-        if self.enable_waving:
-            self.prev_arm_positions = None
-            self.prev_delta = 0.0
-            self.wave_counter = 0
-            self.direction_changes = 0
-            # Identify right arm joints (based on humanoid model experimentation)
-            self.right_arm_joint_indices = [5, 6, 7]  # Shoulder and elbow joints
-        
-    def reset(self, seed=None, options=None):
-        """Reset the environment and return the initial observation."""
-        if seed is not None:
-            super().reset(seed=seed)
+        # Only print when percentage changes by at least 0.1%
+        if percent > self.last_percent + 0.09:  # Use 0.09 to account for float precision
+            # Calculate elapsed time and estimate remaining time
+            elapsed_time = time.time() - self.start_time
+            if self.num_timesteps > 0:
+                time_per_step = elapsed_time / self.num_timesteps
+                remaining_steps = self.total_timesteps - self.num_timesteps
+                remaining_time = remaining_steps * time_per_step
+                
+                # Format times as hours:minutes:seconds
+                elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed_time))
+                remaining_str = time.strftime("%H:%M:%S", time.gmtime(remaining_time))
+                
+                print(f"Progress: {percent:.1f}% ({self.num_timesteps}/{self.total_timesteps} timesteps) | Elapsed: {elapsed_str} | Remaining: {remaining_str}")
+            else:
+                # Avoid division by zero at first step
+                print(f"Progress: {percent:.1f}% ({self.num_timesteps}/{self.total_timesteps} timesteps) | Just started")
             
-        # Reset the dm_control environment
-        time_step = self.env.reset()
+            self.last_percent = percent
         
-        # Reset wave tracking variables only if waving is enabled
-        if self.enable_waving:
-            self.prev_arm_positions = None
-            self.prev_delta = 0.0
-            self.wave_counter = 0
-            self.direction_changes = 0
-        
-        # Return flattened observation and empty info dict (gym standard)
-        return self._flatten_obs(time_step.observation), {}
-        
-    def step(self, action):
-        """Take a step in the environment."""
-        # Execute action in the dm_control environment
-        time_step = self.env.step(action)
-        
-        # Get flattened observation
-        obs = self._flatten_obs(time_step.observation)
-        
-        # Get the stand reward (or 0 if None)
-        stand_reward = float(time_step.reward) if time_step.reward is not None else 0.0
-        
-        # Compute wave reward only if waving is enabled
-        if self.enable_waving:
-            wave_reward = self._compute_wave_reward(time_step.observation)
-            progress_factor = min(1.0, self.wave_counter / 1000)
-            total_reward = stand_reward + 0.3 * progress_factor * wave_reward
-            self.wave_counter += 1
-        else:
-            wave_reward = 0.0
-            total_reward = stand_reward
-        
-        # Check if episode is done
-        done = time_step.last()
-        
-        # Additional info dict with reward components
-        info = {
-            'stand_reward': stand_reward,
-            'wave_reward': wave_reward
-        }
-        
-        # Gym requires both terminated and truncated flags
-        truncated = False
-        
-        return obs, total_reward, done, truncated, info
-        
-    def _flatten_obs(self, obs_dict):
-        """Flatten the observation dictionary into a 1D numpy array."""
-        return np.concatenate([
-            np.array(v, dtype=np.float32).flatten() 
-            for v in obs_dict.values()
-        ])
+        return True
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Humanoid Stand Training')
     
-    def _compute_wave_reward(self, observation):
-        """Compute reward for wave-like motion of the right arm."""
-        if not self.enable_waving:
-            return 0.0
+    parser.add_argument('--mode', type=str, default='train',
+                       choices=['train', 'evaluate'], 
+                       help='Mode: train or evaluate')
+    parser.add_argument('--model_path', type=str, default=None,
+                       help='Path to saved model (for evaluation)')
+    parser.add_argument('--total_timesteps', type=int, default=500000,
+                       help='Total timesteps for training')
+    parser.add_argument('--output_dir', type=str, default='results',
+                       help='Directory to save results')
+    parser.add_argument('--num_envs', type=int, default=8,
+                       help='Number of parallel environments')
+    parser.add_argument('--device', type=str, default='auto',
+                       choices=['auto', 'cpu', 'cuda'],
+                       help='Device to run on (auto, cpu, or cuda)')
+    
+    return parser.parse_args()
+
+
+def make_env():
+    """Create a function that returns a DMCWrapper environment with waving disabled."""
+    def _init():
+        return DMCWrapper(enable_waving=False)  # Disable waving for standing only
+    return _init
+
+
+def train_humanoid_stand(total_timesteps=500000, output_dir='results', num_envs=8, device='auto'):
+    """Train the humanoid to stand with parallel environments."""
+    # Determine device
+    if device == 'auto':
+        if torch.cuda.is_available():
+            print("CUDA is available, but training may be faster on CPU for MlpPolicy.")
+            print("You can force CPU usage with --device cpu or continue with GPU.")
+            device = "cuda"  # Still use CUDA by default
+        else:
+            device = "cpu"
+    
+    print(f"Using device: {device}")
+    if device == "cuda" and torch.cuda.is_available():
+        num_gpus = torch.cuda.device_count()
+        for i in range(num_gpus):
+            gpu_name = torch.cuda.get_device_name(i)
+            print(f"  GPU {i}: {gpu_name}")
+    
+    # Create vectorized environment with multiple parallel instances
+    print(f"Creating {num_envs} parallel environments...")
+    env = SubprocVecEnv([make_env() for _ in range(num_envs)])
+    
+    # Create directories
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create timestamp for this run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Set up checkpoint callback
+    checkpoint_callback = CheckpointCallback(
+        save_freq=max(10000 // num_envs, 1), 
+        save_path=os.path.join(output_dir, f"checkpoints_{timestamp}"),
+        name_prefix="humanoid_stand"
+    )
+    
+    # Set up progress callback
+    progress_callback = ProgressCallback(total_timesteps)
+    
+    # Create the model
+    model = PPO(
+        "MlpPolicy",
+        env,
+        verbose=1,
+        learning_rate=3e-4,
+        n_steps=2048,
+        batch_size=64 if device == "cpu" else 256,  # Smaller for CPU, larger for GPU
+        n_epochs=10,
+        gamma=0.99,
+        device=device,
+        policy_kwargs={"net_arch": [256, 256]}  # Deep network architecture
+    )
+    
+    # Train the model
+    print(f"Training for {total_timesteps} timesteps...")
+    print(f"Progress will be shown as iterations, where each iteration processes")
+    print(f"{num_envs * model.n_steps} timesteps ({num_envs} envs * {model.n_steps} steps)")
+    
+    model.learn(total_timesteps=total_timesteps, callback=[checkpoint_callback, progress_callback])
+    
+    # Save the final model
+    final_model_path = os.path.join(output_dir, "humanoid_stand_final.zip")
+    model.save(final_model_path)
+    print(f"Model saved to {final_model_path}")
+    
+    # For evaluation, we need a non-vectorized environment
+    eval_env = DMCWrapper(enable_waving=False)
+    
+    # Evaluate the model
+    evaluate_model(eval_env, model)
+    
+    # Record videos
+    print("Recording videos of the trained humanoid...")
+    video_path = os.path.join(output_dir, f"humanoid_stand_{timestamp}.mp4")
+    record_video(eval_env, model, video_path)
+    
+    # Record a close-up of the standing motion
+    closeup_path = os.path.join(output_dir, f"humanoid_stand_closeup_{timestamp}.mp4")
+    record_closeup_video_headless(eval_env, model, closeup_path)
+    
+    print(f"Training and evaluation complete.")
+    print(f"Full video: {video_path}")
+    print(f"Close-up video: {closeup_path}")
+    
+    return model
+
+
+def main():
+    """Main entry point."""
+    args = parse_args()
+    
+    if args.mode == 'train':
+        # Train mode
+        train_humanoid_stand(
+            total_timesteps=args.total_timesteps,
+            output_dir=args.output_dir,
+            num_envs=args.num_envs,
+            device=args.device
+        )
+    
+    elif args.mode == 'evaluate':
+        # Evaluation mode
+        if args.model_path is None:
+            raise ValueError("Model path must be provided for evaluation mode")
         
-        # Extract right arm joint positions
-        joint_angles = observation['joint_angles']
-        arm_positions = joint_angles[self.right_arm_joint_indices]
+        # Load model
+        model = PPO.load(args.model_path)
         
-        # Initialize wave reward
-        wave_reward = 0.0
+        # Create environment with waving disabled
+        env = DMCWrapper(enable_waving=False)
         
-        # First time step, just store the position
-        if self.prev_arm_positions is None:
-            self.prev_arm_positions = arm_positions.copy()
-            self.prev_delta = 0.0
-            return wave_reward
+        # Evaluate
+        evaluate_model(env, model)
         
-        # Calculate joint movement (focus on shoulder joint)
-        shoulder_delta = arm_positions[0] - self.prev_arm_positions[0]
+        # Record videos
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Detect direction change (essential for waving)
-        if self.prev_arm_positions[0] > 0.2:  # If arm is elevated
-            if (shoulder_delta > 0.05 and self.prev_delta < -0.05) or \
-               (shoulder_delta < -0.05 and self.prev_delta > 0.05):
-                self.direction_changes += 1
-                wave_reward += 1.0  # Reward for direction change while elevated
+        print("Recording videos of the trained humanoid...")
+        video_path = os.path.join(args.output_dir, f"humanoid_stand_{timestamp}.mp4")
+        record_video(env, model, video_path)
         
-        # Reward for keeping arm elevated (above horizontal)
-        if arm_positions[0] > 0.3:
-            wave_reward += 0.2
+        # Record a close-up of the standing motion
+        closeup_path = os.path.join(args.output_dir, f"humanoid_stand_closeup_{timestamp}.mp4")
+        record_closeup_video_headless(env, model, closeup_path)
         
-        # Extra reward for multiple direction changes (sustained waving)
-        wave_reward += 0.1 * min(10, self.direction_changes)
-        
-        # Store current positions for next step
-        self.prev_arm_positions = arm_positions.copy()
-        self.prev_delta = shoulder_delta
-        
-        return wave_reward
+        print(f"Evaluation complete.")
+        print(f"Full video: {video_path}")
+        print(f"Close-up video: {closeup_path}")
+
+
+if __name__ == "__main__":
+    main()
