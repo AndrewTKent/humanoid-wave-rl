@@ -55,7 +55,7 @@ class ProgressCallback(BaseCallback):
 
         # Calculate and log progress
         percent = round(100 * self.num_timesteps / self.total_timesteps, 1)
-        if percent > self.last_percent + 0.09:
+        if percent > self.last_percent + 0.9:
             elapsed_time = time.time() - self.start_time
             if self.num_timesteps > 0:
                 time_per_step = elapsed_time / self.num_timesteps
