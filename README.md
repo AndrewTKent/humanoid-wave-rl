@@ -19,7 +19,7 @@ git clone https://github.com/yourusername/humanoid-stand-rl.git
 cd humanoid-stand-rl
 
 # Create a virtual environment
-python -m venv stand
+python3 -m venv stand
 
 # Activate the virtual environment
 source stand/bin/activate  # On Windows: stand\Scripts\activate
@@ -44,17 +44,17 @@ pip install -r requirements.txt
 
 ```bash
 # Train with default parameters (16 parallel environments)
-python main.py
+python3 main.py
 
 # Train with custom settings
-python main.py --total_timesteps 500000 --num_envs 8
+python3 main.py --total_timesteps 500000 --num_envs 8
 ```
 
 ### Evaluation
 
 ```bash
 # Evaluate and record video of the trained model
-python main.py --mode evaluate --model_path results/humanoid_stand_final.zip
+python3 main.py --mode evaluate --model_path results/humanoid_stand_final.zip
 ```
 
 The script automatically renders and saves a video of the trained humanoid after both training and evaluation.
