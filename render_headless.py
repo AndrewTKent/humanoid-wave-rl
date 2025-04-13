@@ -13,7 +13,7 @@ from dm_control.mujoco.wrapper.mjbindings import enums
 from dm_control.mujoco.wrapper import mjbindings
 
 # Import Wrapper class - ensure this points to your DMCWrapper class
-from dmc_wrapper import DMCWrapper
+from src.dmc_wrapper import DMCWrapper
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Render video of trained humanoid without display')
