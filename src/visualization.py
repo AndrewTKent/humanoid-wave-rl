@@ -1,11 +1,12 @@
 """
-Visualization utilities for humanoid wave RL.
+Visualization utilities for humanoid standing RL.
 """
 
 import os
 import numpy as np
 import imageio
-from dm_control import viewer
+from dm_control import suite
+from dm_control.suite.wrappers import pixels
 
 
 def evaluate_model(env, model, num_episodes=3):
@@ -16,60 +17,70 @@ def evaluate_model(env, model, num_episodes=3):
         env: Environment to evaluate on
         model: Trained model
         num_episodes: Number of episodes to evaluate
+        
+    Returns:
+        Dictionary with evaluation statistics
     """
     all_rewards = []
-    all_stand_rewards = []
-    all_wave_rewards = []
+    all_episode_lengths = []
     
     for episode in range(num_episodes):
         obs, _ = env.reset()
         done = False
         episode_rewards = []
-        episode_stand_rewards = []
-        episode_wave_rewards = []
+        steps = 0
         
         while not done:
+            steps += 1
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, done, _, info = env.step(action)
-            
             episode_rewards.append(reward)
-            episode_stand_rewards.append(info.get('stand_reward', 0))
-            episode_wave_rewards.append(info.get('wave_reward', 0))
         
         # Compute episode statistics
         total_reward = sum(episode_rewards)
-        total_stand_reward = sum(episode_stand_rewards)
-        total_wave_reward = sum(episode_wave_rewards)
-        
         all_rewards.append(total_reward)
-        all_stand_rewards.append(total_stand_reward)
-        all_wave_rewards.append(total_wave_reward)
+        all_episode_lengths.append(steps)
         
         print(f"Episode {episode+1}:")
         print(f"  Total Reward: {total_reward:.2f}")
-        print(f"  Stand Reward: {total_stand_reward:.2f}")
-        print(f"  Wave Reward: {total_wave_reward:.2f}")
+        print(f"  Episode Length: {steps} steps")
     
     # Print overall statistics
+    mean_reward = np.mean(all_rewards)
+    mean_length = np.mean(all_episode_lengths)
+    
     print("\nEvaluation Summary:")
-    print(f"  Mean Total Reward: {np.mean(all_rewards):.2f}")
-    print(f"  Mean Stand Reward: {np.mean(all_stand_rewards):.2f}")
-    print(f"  Mean Wave Reward: {np.mean(all_wave_rewards):.2f}")
+    print(f"  Mean Total Reward: {mean_reward:.2f}")
+    print(f"  Mean Episode Length: {mean_length:.2f} steps")
+    print(f"  Min/Max Reward: {min(all_rewards):.2f}/{max(all_rewards):.2f}")
+    
+    # Return statistics for logging
+    return {
+        "mean_reward": mean_reward,
+        "mean_episode_length": mean_length,
+        "min_reward": min(all_rewards),
+        "max_reward": max(all_rewards),
+        "std_reward": np.std(all_rewards),
+        "all_rewards": all_rewards,
+        "all_episode_lengths": all_episode_lengths
+    }
 
 
-
-def record_video(env, model, video_path="humanoid_wave.mp4", num_frames=500):
+def record_video(env, model, video_path="humanoid_stand.mp4", num_frames=500):
     """
     Record a video of the humanoid in a headless environment.
+    
+    Args:
+        env: DMCWrapper environment
+        model: Trained model
+        video_path: Path to save the video
+        num_frames: Number of frames to record
+        
+    Returns:
+        Path to the saved video
     """
     print(f"Recording video to {video_path}...")
     
-    # Create an environment for recording
-    import numpy as np
-    import imageio
-    from dm_control import suite
-    from dm_control.suite.wrappers import pixels
-
     # Create environment with pixel rendering enabled
     env_with_pixels = suite.load(domain_name="humanoid", task_name="stand")
     env_with_pixels = pixels.Wrapper(env_with_pixels, render_kwargs={'height': 480, 'width': 640})
@@ -77,6 +88,11 @@ def record_video(env, model, video_path="humanoid_wave.mp4", num_frames=500):
     # Reset environment
     time_step = env_with_pixels.reset()
     frames = []
+    
+    # Track metrics during recording
+    total_reward = 0
+    min_reward = float('inf')
+    max_reward = float('-inf')
     
     for i in range(num_frames):
         if i % 100 == 0:
@@ -91,6 +107,13 @@ def record_video(env, model, video_path="humanoid_wave.mp4", num_frames=500):
         # Step the environment
         time_step = env_with_pixels.step(action)
         
+        # Track reward
+        if time_step.reward is not None:
+            reward = float(time_step.reward)
+            total_reward += reward
+            min_reward = min(min_reward, reward)
+            max_reward = max(max_reward, reward)
+        
         # Render and store frame
         pixels = env_with_pixels.physics.render(height=480, width=640, camera_id=0)
         frames.append(pixels)
@@ -104,64 +127,8 @@ def record_video(env, model, video_path="humanoid_wave.mp4", num_frames=500):
     imageio.mimsave(video_path, frames, fps=30)
     print(f"Video saved to {video_path}")
     
+    # Print statistics from the recording
+    if min_reward != float('inf'):
+        print(f"  Recording stats - Total reward: {total_reward:.2f}, Min/Max reward: {min_reward:.2f}/{max_reward:.2f}")
+    
     return video_path
-
-
-def record_closeup_video_headless(model_path, output_path, num_frames=500):
-    """Record a close-up video focused on the waving action"""
-    print(f"Loading model from {model_path}")
-    model = PPO.load(model_path)
-    
-    print(f"Recording close-up video to {output_path}...")
-    
-    # Regular environment for action prediction
-    env = DMCWrapper()
-    
-    # Environment with rendering capabilities
-    render_env = suite.load(domain_name="humanoid", task_name="stand")
-    render_env = pixels.Wrapper(render_env)
-    
-    # Reset environments
-    obs, _ = env.reset()
-    time_step = render_env.reset()
-    
-    frames = []
-    
-    # Let the humanoid stabilize before recording
-    for _ in range(100):
-        action, _ = model.predict(obs, deterministic=True)
-        obs, _, done, _, _ = env.step(action)
-        time_step = render_env.step(action)
-        if done:
-            obs, _ = env.reset()
-            time_step = render_env.reset()
-    
-    for i in range(num_frames):
-        if i % 100 == 0:
-            print(f"  Rendering frame {i+1}/{num_frames}")
-        
-        # Get action from model
-        action, _ = model.predict(obs, deterministic=True)
-        
-        # Step environments
-        obs, reward, done, _, _ = env.step(action)
-        time_step = render_env.step(action)
-        
-        # Get frame with camera focused on upper body
-        # The camera_id=1 often gives a closer view
-        frame = render_env.physics.render(
-            height=720, 
-            width=1280, 
-            camera_id=1
-        )
-        frames.append(frame)
-        
-        # Reset if done
-        if done:
-            obs, _ = env.reset()
-            time_step = render_env.reset()
-    
-    # Save the video
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    imageio.mimsave(output_path, frames, fps=30)
-    print(f"Video saved to {output_path}")
