@@ -1,5 +1,5 @@
 """
-Main script for humanoid stand training and evaluation with optimized performance.
+Main script for humanoid stand training and evaluation with wandb tracking.
 """
 
 import os
@@ -7,6 +7,7 @@ import time
 import argparse
 import torch
 from datetime import datetime
+import wandb
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_checker import check_env
@@ -19,39 +20,54 @@ from src.visualization import evaluate_model, record_video, record_closeup_video
 
 class ProgressCallback(BaseCallback):
     """
-    Custom callback for printing training progress as percentage and estimated time.
+    Custom callback for printing training progress and logging to wandb.
     """
     def __init__(self, total_timesteps, verbose=0):
         super(ProgressCallback, self).__init__(verbose)
         self.total_timesteps = total_timesteps
-        self.last_percent = -0.1  # Initialize to -0.1 to print at 0.0%
+        self.last_percent = -0.1
         self.start_time = time.time()
-    
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.current_episode_reward = 0
+        self.current_episode_length = 0
+
     def _on_step(self):
         """Called after each step of the environment"""
-        # Calculate percentage with one decimal place
+        # Accumulate rewards and lengths
+        self.current_episode_reward += self.locals['rewards'][0]
+        self.current_episode_length += 1
+
+        # Check if episode is done
+        if self.locals['dones'][0]:
+            self.episode_rewards.append(self.current_episode_reward)
+            self.episode_lengths.append(self.current_episode_length)
+            # Log to wandb
+            wandb.log({
+                "episode_reward": self.current_episode_reward,
+                "episode_length": self.current_episode_length,
+                "stand_reward": self.locals['infos'][0].get('stand_reward', 0),
+                "wave_reward": self.locals['infos'][0].get('wave_reward', 0),
+            })
+            # Reset episode accumulators
+            self.current_episode_reward = 0
+            self.current_episode_length = 0
+
+        # Calculate and log progress
         percent = round(100 * self.num_timesteps / self.total_timesteps, 1)
-        
-        # Only print when percentage changes by at least 0.1%
-        if percent > self.last_percent + 0.09:  # Use 0.09 to account for float precision
-            # Calculate elapsed time and estimate remaining time
+        if percent > self.last_percent + 0.09:
             elapsed_time = time.time() - self.start_time
             if self.num_timesteps > 0:
                 time_per_step = elapsed_time / self.num_timesteps
                 remaining_steps = self.total_timesteps - self.num_timesteps
                 remaining_time = remaining_steps * time_per_step
-                
-                # Format times as hours:minutes:seconds
                 elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed_time))
                 remaining_str = time.strftime("%H:%M:%S", time.gmtime(remaining_time))
-                
                 print(f"Progress: {percent:.1f}% ({self.num_timesteps}/{self.total_timesteps} timesteps) | Elapsed: {elapsed_str} | Remaining: {remaining_str}")
             else:
-                # Avoid division by zero at first step
                 print(f"Progress: {percent:.1f}% ({self.num_timesteps}/{self.total_timesteps} timesteps) | Just started")
-            
             self.last_percent = percent
-        
+
         return True
 
 
@@ -73,6 +89,8 @@ def parse_args():
     parser.add_argument('--device', type=str, default='auto',
                        choices=['auto', 'cpu', 'cuda'],
                        help='Device to run on (auto, cpu, or cuda)')
+    parser.add_argument('--wandb', action='store_true',
+                       help='Enable wandb logging')
     
     return parser.parse_args()
 
@@ -84,8 +102,15 @@ def make_env():
     return _init
 
 
-def train_humanoid_stand(total_timesteps=500000, output_dir='results', num_envs=8, device='auto'):
-    """Train the humanoid to stand with parallel environments."""
+def train_humanoid_stand(total_timesteps=500000, output_dir='results', num_envs=8, device='auto', use_wandb=False):
+    """Train the humanoid to stand with parallel environments and optional wandb logging."""
+    if use_wandb:
+        wandb.init(project="humanoid-stand-wave", entity="andrewkent", config={
+            "total_timesteps": total_timesteps,
+            "num_envs": num_envs,
+            "device": device,
+        })
+
     # Determine device
     if device == 'auto':
         if torch.cuda.is_available():
@@ -163,9 +188,19 @@ def train_humanoid_stand(total_timesteps=500000, output_dir='results', num_envs=
     closeup_path = os.path.join(output_dir, f"humanoid_stand_closeup_{timestamp}.mp4")
     record_closeup_video_headless(eval_env, model, closeup_path)
     
+    if use_wandb:
+        # Log videos to wandb
+        wandb.log({
+            "video_full": wandb.Video(video_path, fps=30, format="mp4"),
+            "video_closeup": wandb.Video(closeup_path, fps=30, format="mp4"),
+        })
+    
     print(f"Training and evaluation complete.")
     print(f"Full video: {video_path}")
     print(f"Close-up video: {closeup_path}")
+    
+    if use_wandb:
+        wandb.finish()
     
     return model
 
@@ -180,7 +215,8 @@ def main():
             total_timesteps=args.total_timesteps,
             output_dir=args.output_dir,
             num_envs=args.num_envs,
-            device=args.device
+            device=args.device,
+            use_wandb=args.wandb
         )
     
     elif args.mode == 'evaluate':
@@ -207,6 +243,14 @@ def main():
         # Record a close-up of the standing motion
         closeup_path = os.path.join(args.output_dir, f"humanoid_stand_closeup_{timestamp}.mp4")
         record_closeup_video_headless(env, model, closeup_path)
+        
+        if args.wandb:
+            wandb.init(project="humanoid-stand-wave", entity="andrewkent", config={"mode": "evaluate"})
+            wandb.log({
+                "video_full": wandb.Video(video_path, fps=30, format="mp4"),
+                "video_closeup": wandb.Video(closeup_path, fps=30, format="mp4"),
+            })
+            wandb.finish()
         
         print(f"Evaluation complete.")
         print(f"Full video: {video_path}")
