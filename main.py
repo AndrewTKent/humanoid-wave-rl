@@ -1,5 +1,5 @@
 """
-Main script for humanoid wave training and evaluation with optimized performance.
+Main script for humanoid standing training and evaluation.
 """
 
 import os
@@ -13,8 +13,8 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 
-from src.dmc_wrapper import DMCWrapper
-from src.visualization import evaluate_model, record_video, record_closeup_video_headless
+from dmc_wrapper import DMCWrapper
+from visualization import evaluate_model, record_video
 
 
 class ProgressCallback(BaseCallback):
@@ -56,7 +56,7 @@ class ProgressCallback(BaseCallback):
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Humanoid Wave Training')
+    parser = argparse.ArgumentParser(description='Humanoid Standing Training')
     
     parser.add_argument('--mode', type=str, default='train',
                        choices=['train', 'evaluate'], 
@@ -83,8 +83,8 @@ def make_env():
     return _init
 
 
-def train_humanoid_wave(total_timesteps=1000000, output_dir='results', num_envs=16, device='auto'):
-    """Train the humanoid to stand and wave with parallel environments."""
+def train_humanoid_stand(total_timesteps=1000000, output_dir='results', num_envs=16, device='auto'):
+    """Train the humanoid to stand with parallel environments."""
     # Determine device
     if device == 'auto':
         if torch.cuda.is_available():
@@ -115,7 +115,7 @@ def train_humanoid_wave(total_timesteps=1000000, output_dir='results', num_envs=
     checkpoint_callback = CheckpointCallback(
         save_freq=max(10000 // num_envs, 1), 
         save_path=os.path.join(output_dir, f"checkpoints_{timestamp}"),
-        name_prefix="humanoid_wave"
+        name_prefix="humanoid_stand"
     )
     
     # Set up progress callback
@@ -143,7 +143,7 @@ def train_humanoid_wave(total_timesteps=1000000, output_dir='results', num_envs=
     model.learn(total_timesteps=total_timesteps, callback=[checkpoint_callback, progress_callback])
     
     # Save the final model
-    final_model_path = os.path.join(output_dir, "humanoid_wave_final.zip")
+    final_model_path = os.path.join(output_dir, "humanoid_stand_final.zip")
     model.save(final_model_path)
     print(f"Model saved to {final_model_path}")
     
@@ -155,16 +155,11 @@ def train_humanoid_wave(total_timesteps=1000000, output_dir='results', num_envs=
     
     # Record videos
     print("Recording videos of the trained humanoid...")
-    video_path = os.path.join(output_dir, f"humanoid_wave_{timestamp}.mp4")
+    video_path = os.path.join(output_dir, f"humanoid_stand_{timestamp}.mp4")
     record_video(eval_env, model, video_path)
     
-    # Record a close-up of the waving motion
-    closeup_path = os.path.join(output_dir, f"humanoid_wave_closeup_{timestamp}.mp4")
-    record_closeup_video_headless(eval_env, model, closeup_path)
-    
     print(f"Training and evaluation complete.")
-    print(f"Full video: {video_path}")
-    print(f"Close-up video: {closeup_path}")
+    print(f"Video: {video_path}")
     
     return model
 
@@ -175,7 +170,7 @@ def main():
     
     if args.mode == 'train':
         # Train mode
-        train_humanoid_wave(
+        train_humanoid_stand(
             total_timesteps=args.total_timesteps,
             output_dir=args.output_dir,
             num_envs=args.num_envs,
@@ -200,16 +195,11 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         print("Recording videos of the trained humanoid...")
-        video_path = os.path.join(args.output_dir, f"humanoid_wave_{timestamp}.mp4")
+        video_path = os.path.join(args.output_dir, f"humanoid_stand_{timestamp}.mp4")
         record_video(env, model, video_path)
         
-        # Record a close-up of the waving motion
-        closeup_path = os.path.join(args.output_dir, f"humanoid_wave_closeup_{timestamp}.mp4")
-        record_waving_closeup(env, model, closeup_path)
-        
         print(f"Evaluation complete.")
-        print(f"Full video: {video_path}")
-        print(f"Close-up video: {closeup_path}")
+        print(f"Video: {video_path}")
 
 
 if __name__ == "__main__":
