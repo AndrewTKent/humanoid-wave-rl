@@ -21,14 +21,13 @@ class DMCWrapper(gym.Env):
         obs_spec = self.env.observation_spec()
         if not isinstance(obs_spec, collections.OrderedDict):
              print("Warning: Observation spec is not an OrderedDict. Flattening order might be inconsistent.")
-             # Convert to OrderedDict if possible, otherwise use default dict order (less reliable)
              obs_spec = collections.OrderedDict(obs_spec)
-
+        
         self._obs_keys = list(obs_spec.keys()) # Store keys for consistent flattening
-        total_obs_dim = sum(np.prod(spec.shape) for spec in obs_spec.values())
-
+        # Calculate total_obs_dim and explicitly cast to int
+        total_obs_dim = int(sum(np.prod(spec.shape) for spec in obs_spec.values())) # <--- ADD int() CAST HERE
+        
         # Define the observation space (continuous vector of all observations combined)
-        # Use float64 for DMC compatibility, then convert to float32 later if needed by SB3
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(total_obs_dim,), dtype=np.float64
         )
