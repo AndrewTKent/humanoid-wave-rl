@@ -1,14 +1,15 @@
 """
-Main script for humanoid stand training and evaluation with wandb tracking.
+Main script for humanoid stand & wave training and evaluation with wandb tracking.
+Enhanced with curriculum learning and exploration parameters.
 """
 
 import os
 import time
 import argparse
 import torch
+import numpy as np
 from datetime import datetime
 import wandb
-import numpy as np
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_checker import check_env
@@ -32,6 +33,8 @@ class ProgressCallback(BaseCallback):
         self.episode_lengths = []
         self.current_episode_reward = 0
         self.current_episode_length = 0
+        self.current_height = 0
+        self.max_height_reached = 0
         self.fps_buffer = []
         self.fps_buffer_size = 10  # Average FPS over last 10 updates
 
@@ -40,22 +43,39 @@ class ProgressCallback(BaseCallback):
         # Accumulate rewards and lengths for the first environment
         self.current_episode_reward += self.locals['rewards'][0]
         self.current_episode_length += 1
+        
+        # Track heights if available in infos
+        if 'height' in self.locals['infos'][0]:
+            self.current_height = self.locals['infos'][0]['height']
+            self.max_height_reached = max(self.max_height_reached, self.current_height)
 
         # Check if episode is done for the first environment
         if self.locals['dones'][0]:
             self.episode_rewards.append(self.current_episode_reward)
             self.episode_lengths.append(self.current_episode_length)
+            
+            # Extract all available info for logging
+            info = self.locals['infos'][0]
+            
             # Log episode metrics to wandb with "episode/" prefix
-            wandb.log({
+            log_data = {
                 "episode/reward": self.current_episode_reward,
                 "episode/length": self.current_episode_length,
-                "episode/stand_reward": self.locals['infos'][0].get('stand_reward', 0),
-                "episode/wave_reward": self.locals['infos'][0].get('wave_reward', 0),
+                "episode/stand_reward": info.get('stand_reward', 0),
+                "episode/wave_reward": info.get('wave_reward', 0),
+                "episode/max_height": self.max_height_reached,
+                "episode/standing_assist": info.get('standing_assist', 0),
+                "episode/early_termination": info.get('early_termination', False),
                 "timesteps": self.num_timesteps,
-            })
+            }
+            
+            wandb.log(log_data)
+            
             # Reset episode accumulators
             self.current_episode_reward = 0
             self.current_episode_length = 0
+            self.current_height = 0
+            self.max_height_reached = 0
 
         # Calculate and log progress
         percent = round(100 * self.num_timesteps / self.total_timesteps, 1)
@@ -158,20 +178,30 @@ def parse_args():
                        help='Network architecture as a Python list of layer sizes')
     parser.add_argument('--enable_waving', action='store_true',
                        help='Enable waving behavior in training')
+    parser.add_argument('--initial_standing_assist', type=float, default=0.8,
+                       help='Initial standing assistance level (0.0-1.0) for curriculum learning')
+    parser.add_argument('--ent_coef', type=float, default=0.01, 
+                       help='Entropy coefficient for exploration')
+    parser.add_argument('--max_steps', type=int, default=1000,
+                       help='Maximum steps per episode')
     
     return parser.parse_args()
 
 
-def make_env(enable_waving=False):
+def make_env(enable_waving=False, initial_standing_assist=0.8, max_steps=1000):
     """Create a function that returns a DMCWrapper environment."""
     def _init():
-        return DMCWrapper(enable_waving=enable_waving)
+        return DMCWrapper(enable_waving=enable_waving, 
+                         initial_standing_assist=initial_standing_assist,
+                         max_steps=max_steps)
     return _init
 
 
 def train_humanoid_stand(total_timesteps=500000, output_dir='results', num_envs=8, 
                          device='auto', use_wandb=False, learning_rate=3e-4, 
-                         batch_size=None, n_steps=2048, net_arch=None, enable_waving=False):
+                         batch_size=None, n_steps=2048, net_arch=None, 
+                         enable_waving=False, initial_standing_assist=0.8,
+                         ent_coef=0.01, max_steps=1000):
     """Train the humanoid to stand with parallel environments and optional wandb logging."""
     if net_arch is None:
         net_arch = [256, 256]
@@ -186,6 +216,9 @@ def train_humanoid_stand(total_timesteps=500000, output_dir='results', num_envs=
             "n_steps": n_steps,
             "net_arch": net_arch,
             "enable_waving": enable_waving,
+            "initial_standing_assist": initial_standing_assist,
+            "ent_coef": ent_coef,
+            "max_steps": max_steps,
         })
 
     # Determine device
@@ -206,7 +239,8 @@ def train_humanoid_stand(total_timesteps=500000, output_dir='results', num_envs=
     
     # Create vectorized environment with multiple parallel instances
     print(f"Creating {num_envs} parallel environments...")
-    env = SubprocVecEnv([make_env(enable_waving) for _ in range(num_envs)])
+    env = SubprocVecEnv([make_env(enable_waving, initial_standing_assist, max_steps) 
+                         for _ in range(num_envs)])
     
     # Create directories
     os.makedirs(output_dir, exist_ok=True)
@@ -216,7 +250,7 @@ def train_humanoid_stand(total_timesteps=500000, output_dir='results', num_envs=
     
     # Set up checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(10000 // num_envs, 1), 
+        save_freq=max(50000 // num_envs, 1),  # Save every ~50K steps 
         save_path=os.path.join(output_dir, f"checkpoints_{timestamp}"),
         name_prefix="humanoid_stand",
         save_replay_buffer=True,
@@ -230,7 +264,15 @@ def train_humanoid_stand(total_timesteps=500000, output_dir='results', num_envs=
     if batch_size is None:
         batch_size = 64 if device == "cpu" else 256  # Smaller for CPU, larger for GPU
     
-    # Create the model
+    # Create the model with adaptively scaled exploration
+    # High entropy at the beginning, reduces over time
+    initial_entropy = ent_coef
+    
+    # Schedule for entropy coefficient - higher at the start, lower later
+    def get_ent_coef():
+        progress = model.num_timesteps / total_timesteps
+        return initial_entropy * (1.0 - progress * 0.9)  # Reduce by 90% over training
+    
     model = PPO(
         "MlpPolicy",
         env,
@@ -240,8 +282,13 @@ def train_humanoid_stand(total_timesteps=500000, output_dir='results', num_envs=
         batch_size=batch_size,
         n_epochs=10,
         gamma=0.99,
+        ent_coef=ent_coef,  # Start with high entropy for exploration
+        clip_range=0.2,
         device=device,
-        policy_kwargs={"net_arch": net_arch}
+        policy_kwargs={
+            "net_arch": net_arch,
+            "activation_fn": torch.nn.ReLU
+        }
     )
     
     # Log model parameters
@@ -267,7 +314,8 @@ def train_humanoid_stand(total_timesteps=500000, output_dir='results', num_envs=
     print(f"Model saved to {final_model_path}")
     
     # For evaluation, we need a non-vectorized environment
-    eval_env = DMCWrapper(enable_waving=enable_waving)
+    eval_env = DMCWrapper(enable_waving=enable_waving, 
+                         initial_standing_assist=0.0)  # No assistance during evaluation
     
     # Evaluate the model
     eval_results = evaluate_model(eval_env, model)
@@ -280,27 +328,25 @@ def train_humanoid_stand(total_timesteps=500000, output_dir='results', num_envs=
             "eval/mean_wave_reward": eval_results["mean_wave_reward"],
         })
     
-    # Record videos using xvfb to handle headless environments
+    # Record videos using xvfb-run to handle headless environments
     try:
         print("Recording videos of the trained humanoid...")
-        video_path = os.path.join(output_dir, f"humanoid_stand_{timestamp}.mp4")
-        closeup_path = os.path.join(output_dir, f"humanoid_stand_closeup_{timestamp}.mp4")
+        video_path = os.path.join(output_dir, f"humanoid_video_{total_timesteps//1000}k.mp4")
         
-        # Use headless rendering to avoid display issues
-        os.system(f"xvfb-run -a python render_video.py --model_path {final_model_path} --output_path {video_path}")
-        os.system(f"xvfb-run -a python render_closeup_video.py --model_path {final_model_path} --output_path {closeup_path}")
+        # Use render_video.py with xvfb-run for headless rendering
+        render_cmd = f"xvfb-run -a python render_video.py --model_path {final_model_path} --output_path {video_path}"
+        print(f"Executing: {render_cmd}")
+        os.system(render_cmd)
         
-        if use_wandb and os.path.exists(video_path) and os.path.exists(closeup_path):
-            # Log videos to wandb
+        if use_wandb and os.path.exists(video_path):
+            # Log video to wandb
             wandb.log({
-                "video_full": wandb.Video(video_path, fps=30, format="mp4"),
-                "video_closeup": wandb.Video(closeup_path, fps=30, format="mp4"),
+                "video": wandb.Video(video_path, fps=30, format="mp4"),
             })
             
-        print(f"Full video: {video_path}")
-        print(f"Close-up video: {closeup_path}")
+        print(f"Video saved to: {video_path}")
     except Exception as e:
-        print(f"Error recording videos: {e}")
+        print(f"Error recording video: {e}")
     
     if use_wandb:
         wandb.finish()
@@ -334,7 +380,10 @@ def main():
             batch_size=args.batch_size,
             n_steps=args.n_steps,
             net_arch=net_arch,
-            enable_waving=args.enable_waving
+            enable_waving=args.enable_waving,
+            initial_standing_assist=args.initial_standing_assist,
+            ent_coef=args.ent_coef,
+            max_steps=args.max_steps
         )
     
     elif args.mode == 'evaluate':
@@ -345,45 +394,40 @@ def main():
         # Load model
         model = PPO.load(args.model_path)
         
-        # Create environment with waving enabled/disabled based on args
-        env = DMCWrapper(enable_waving=args.enable_waving)
+        # Create environment with no standing assistance for proper evaluation
+        env = DMCWrapper(
+            enable_waving=args.enable_waving,
+            initial_standing_assist=0.0  # No assistance during evaluation
+        )
         
         # Evaluate
         eval_results = evaluate_model(env, model)
         
-        if args.wandb:
-            wandb.init(project="humanoid-stand-wave", entity="andrewkent", config={"mode": "evaluate"})
-            # Log evaluation results
-            wandb.log({
-                "eval/mean_reward": eval_results["mean_total_reward"],
-                "eval/mean_stand_reward": eval_results["mean_stand_reward"],
-                "eval/mean_wave_reward": eval_results["mean_wave_reward"],
-            })
-        
-        # Record videos using headless rendering
+        # Record video using xvfb-run
         try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            video_path = os.path.join(args.output_dir, f"humanoid_stand_{timestamp}.mp4")
-            closeup_path = os.path.join(args.output_dir, f"humanoid_stand_closeup_{timestamp}.mp4")
+            print("Recording video of the trained humanoid...")
+            video_path = os.path.join(args.output_dir, f"humanoid_video_eval.mp4")
             
-            print("Recording videos of the trained humanoid...")
-            os.system(f"xvfb-run -a python render_video.py --model_path {args.model_path} --output_path {video_path}")
-            os.system(f"xvfb-run -a python render_closeup_video.py --model_path {args.model_path} --output_path {closeup_path}")
+            # Use render_video.py with xvfb-run for headless rendering
+            render_cmd = f"xvfb-run -a python render_video.py --model_path {args.model_path} --output_path {video_path}"
+            print(f"Executing: {render_cmd}")
+            os.system(render_cmd)
             
-            if args.wandb and os.path.exists(video_path) and os.path.exists(closeup_path):
+            if args.wandb and os.path.exists(video_path):
+                wandb.init(project="humanoid-stand-wave", entity="andrewkent", config={"mode": "evaluate"})
                 wandb.log({
-                    "video_full": wandb.Video(video_path, fps=30, format="mp4"),
-                    "video_closeup": wandb.Video(closeup_path, fps=30, format="mp4"),
+                    "video": wandb.Video(video_path, fps=30, format="mp4"),
+                    "eval/mean_reward": eval_results["mean_total_reward"],
+                    "eval/mean_stand_reward": eval_results["mean_stand_reward"],
+                    "eval/mean_wave_reward": eval_results["mean_wave_reward"],
                 })
+                wandb.finish()
                 
-            print(f"Evaluation complete.")
-            print(f"Full video: {video_path}")
-            print(f"Close-up video: {closeup_path}")
+            print(f"Video saved to: {video_path}")
         except Exception as e:
-            print(f"Error recording videos: {e}")
+            print(f"Error recording video: {e}")
         
-        if args.wandb:
-            wandb.finish()
+        print(f"Evaluation complete.")
 
 
 if __name__ == "__main__":
