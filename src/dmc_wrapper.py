@@ -145,9 +145,6 @@ class DMCWrapper(gym.Env):
             
         # Terminate if lying down for too long
         fall_terminated = False
-        if self.lying_down_steps > 20:  # Faster termination when fallen
-            fall_terminated = True
-            terminated = True
 
         # Check for jumping (feet too high off ground)
         jump_detected = False
