@@ -359,8 +359,9 @@ def train_humanoid_stand(args):
         }
     )
     
-    # Initialize callbacks with model right before training
-    progress_callback.init_callback(model)
+    # Initialize callbacks with model if they have an init_callback method
+    if hasattr(progress_callback, 'init_callback'):
+        progress_callback.init_callback(model)
     
     # Train the model
     print(f"Training for {total_timesteps} timesteps...")
@@ -380,10 +381,19 @@ def train_humanoid_stand(args):
     )
     
     # Evaluate the model
-    eval_results = evaluate_model(eval_env, model)
-    print(f"Evaluation Results:")
-    for key, value in eval_results.items():
-        print(f"  {key}: {value}")
+    try:
+        eval_results = evaluate_model(eval_env, model)
+        print(f"Evaluation Results:")
+        for key, value in eval_results.items():
+            print(f"  {key}: {value}")
+    except Exception as e:
+        print(f"Error during evaluation: {e}")
+        # Create a default results dictionary so we don't get NoneType errors
+        eval_results = {
+            "mean_total_reward": -1000.0,
+            "mean_stand_reward": -1000.0,
+            "mean_wave_reward": 0.0
+        }
     
     # Record videos using xvfb-run to handle headless environments
     try:
@@ -415,7 +425,6 @@ def train_humanoid_stand(args):
     print(f"Training and evaluation complete.")
     
     return model, final_model_path
-
 
 def evaluate_trained_model(args):
     """Evaluate a pre-trained model."""
