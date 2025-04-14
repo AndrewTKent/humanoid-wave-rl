@@ -200,42 +200,78 @@ class DMCWrapper(gym.Env):
             return [float(left_foot_height), float(right_foot_height)]
         except:
             return [0.1, 0.1]  # Default if lookup fails
-
+            
     def _compute_stand_reward(self):
-        """Reward function that gives exponentially negative reward below 0.3,
-        exponentially positive between 0.3 and STAND_HEIGHT, and zero above."""
+        """Improved reward function that balances height, orientation, feet position, and stability."""
         physics = self.env.physics
         
-        # Get head height 
+        # 1. Height Reward Component (more gradual than before)
         try:
             head_height = physics.named.data.geom_xpos['head', 'z']
         except:
-            # If head lookup fails, use torso height as approximation
             head_height = self._get_height()
         
-        # Define standard humanoid stand height from DeepMind
+        # Target standing height
         STAND_HEIGHT = 1.4
         
-        # Calculate reward based on height
-        if head_height < 0.3:
-            # Exponentially worse penalty as height approaches 0
-            # Base penalty of -30 at height=0.3, gets much worse as height decreases
-            c = 30.0  # Base penalty value
-            d = 5.0   # Controls how quickly penalty increases
-            # This formula gives -30 at height=0.3 and gets exponentially worse as height decreases
-            reward = -c * np.exp(d * (0.3 - head_height))
-            return float(reward)
-        elif head_height <= STAND_HEIGHT:
-            # Exponential reward that grows from ~0 at height=0.3 to maximum at height=STAND_HEIGHT
-            normalized_height = (head_height - 0.3) / (STAND_HEIGHT - 0.3)
-            # Using exponential growth formula: a * (e^(b*x) - 1)
-            a = 100.0  # Maximum reward value
-            b = 2.0    # Controls curve steepness
-            reward = a * (np.exp(b * normalized_height) - 1)
-            return float(reward)
+        # Smoother height reward using tanh-based normalization
+        # Maps height from 0 to STAND_HEIGHT to a value between -2 and +2
+        # Less harsh penalties, more gradual rewards
+        if head_height < 0.05:
+            # Very low heights still get significant penalty
+            height_reward = -3.0
         else:
-            # Zero reward for heights above STAND_HEIGHT
-            return 0.0
+            # Normalized height from 0.05 to STAND_HEIGHT
+            norm_height = (head_height - 0.05) / (STAND_HEIGHT - 0.05)
+            # Clip to avoid extreme values
+            norm_height = max(0.0, min(1.0, norm_height))
+            # Transform to a reward between -2 and +2 with a smooth gradient
+            height_reward = 4.0 * (norm_height - 0.5)
+        
+        # 2. Orientation Reward Component
+        # Get quaternion representing torso orientation (w,x,y,z)
+        try:
+            # The first quaternion is usually the root/torso
+            quat = physics.data.qpos[3:7]
+            # Perfect upright orientation is [1,0,0,0]
+            # Dot product gives cosine of angle between current and upright
+            upright_reward = quat[0]  # w component, gives 1.0 when perfectly upright
+            # Scale to a 0-1 range, emphasizing being close to upright
+            upright_reward = upright_reward ** 2
+        except:
+            upright_reward = 0.5  # Default if we can't get orientation
+        
+        # 3. Feet Position Reward
+        foot_heights = self._get_foot_heights()
+        foot_reward = 0.0
+        
+        # Reward for feet being on the ground (not too high)
+        foot_ground_contact = sum(1.0 for h in foot_heights if h < 0.1)
+        foot_reward += 0.5 * (foot_ground_contact / len(foot_heights))
+        
+        # 4. Stability Reward (penalize excessive angular velocity)
+        try:
+            # Get angular velocity norm (how fast the humanoid is rotating)
+            ang_vel = physics.data.qvel[3:6]  # Angular velocity components
+            ang_vel_norm = np.linalg.norm(ang_vel)
+            
+            # Penalize high angular velocity (unstable rotation)
+            # Using a soft exponential penalty that maxes out at -1.0
+            stability_reward = -min(1.0, ang_vel_norm / 5.0)
+        except:
+            stability_reward = 0.0  # Default if we can't get angular velocity
+        
+        # 5. Combine rewards with appropriate weights
+        # Height is most important, then orientation, then feet, then stability
+        combined_reward = (
+            2.0 * height_reward +     # Weight: 2.0
+            1.5 * upright_reward +    # Weight: 1.5
+            1.0 * foot_reward +       # Weight: 1.0
+            0.5 * stability_reward    # Weight: 0.5
+        )
+        
+        # Ensure we return a scalar float
+        return float(combined_reward)
 
     def _flatten_obs(self, obs_dict):
         """Flatten observation dictionary."""
