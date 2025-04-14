@@ -4,16 +4,16 @@ from dm_control import suite
 import collections
 
 class DMCWrapper(gym.Env):
-    """Simplified wrapper focused exclusively on standing."""
+    """Wrapper for humanoid standing with focus on head height and feet on ground."""
 
     def __init__(self, domain_name="humanoid", task_name="stand",
                  max_steps=1000, seed=None):
-        
+
         # Load the environment
         random_state = np.random.RandomState(seed) if seed is not None else None
         self.env = suite.load(domain_name=domain_name, task_name=task_name, 
                              task_kwargs={'random': random_state})
-        
+
         # Get observation specs
         obs_spec = self.env.observation_spec()
         if not isinstance(obs_spec, collections.OrderedDict):
@@ -26,7 +26,7 @@ class DMCWrapper(gym.Env):
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(total_obs_dim,), dtype=np.float64
         )
-        
+
         action_spec = self.env.action_spec()
         self.action_space = gym.spaces.Box(
             low=action_spec.minimum.astype(np.float32),
@@ -34,7 +34,7 @@ class DMCWrapper(gym.Env):
             shape=action_spec.shape,
             dtype=np.float32
         )
-        
+
         # Episode tracking
         self.max_steps = max_steps
         self.steps_this_episode = 0
@@ -49,16 +49,16 @@ class DMCWrapper(gym.Env):
         self.total_reward = 0.0
         # Track previous height for velocity calculation
         self.prev_height = None
-                 
+
     def reset(self, seed=None, options=None):
         """Reset the environment with a standard starting position."""
         if seed is not None:
             super().reset(seed=seed)
             if hasattr(self.env._task, 'random'):
                 self.env._task.random.seed(seed)
-        
+
         time_step = self.env.reset()
-        
+
         # Apply starting position
         with self.env.physics.reset_context():
             qpos = self.env.physics.data.qpos.copy()
@@ -69,25 +69,25 @@ class DMCWrapper(gym.Env):
             
             # Apply the modified state
             self.env.physics.set_state(np.concatenate([qpos, qvel]))
-        
+
         # Reset episode variables
         self.steps_this_episode = 0
         self.best_height_this_episode = self._get_height()
         self.total_reward = 0.0
         self.lying_down_steps = 0
         self.prev_height = self._get_height()
-        
+
         # Get initial observation and info
         obs = self._flatten_obs(time_step.observation)
         
-        # Add foot position observation to help with learning
+        # Get foot heights for info
         foot_heights = self._get_foot_heights()
         
         info = {'height': self._get_height(),
                 'foot_heights': foot_heights}
-        
+
         return obs.astype(np.float32), info
-        
+    
     def _apply_standing_position(self, qpos, qvel):
         """Apply a stable standing position with feet firmly on ground."""
         # Set to standing height
@@ -116,66 +116,6 @@ class DMCWrapper(gym.Env):
         
         # Zero all velocities
         qvel[:] = 0.0
-
-    def _get_foot_heights(self):
-        """Get the heights of the feet."""
-        try:
-            left_foot_height = self.env.physics.named.data.geom_xpos['left_foot', 'z']
-            right_foot_height = self.env.physics.named.data.geom_xpos['right_foot', 'z']
-            return [float(left_foot_height), float(right_foot_height)]
-        except:
-            return [0.1, 0.1]  # Default if lookup fails
-    
-    def _apply_crouched_position(self, qpos, qvel):
-        """Apply a crouched starting position."""
-        # Lower height
-        qpos[2] = 0.8  # Lower position but not on ground
-        
-        # Slightly tilted but mostly upright
-        qpos[3:7] = [0.95, 0.1, 0.0, 0.0]  # Quaternion with slight tilt
-        qpos[3:7] /= np.linalg.norm(qpos[3:7])  # Normalize
-        
-        # Set joint positions for a crouch
-        joint_indices = slice(7, len(qpos))
-        qpos[joint_indices] = np.random.normal(0, 0.2, size=qpos[joint_indices].shape)
-        
-        # Try to bend knees and hips if available
-        try:
-            knee_hip_indices = [
-                self.env.physics.model.name2id('left_knee', 'joint'),
-                self.env.physics.model.name2id('right_knee', 'joint'),
-                self.env.physics.model.name2id('left_hip_x', 'joint'),
-                self.env.physics.model.name2id('right_hip_x', 'joint')
-            ]
-            knee_hip_indices = [i-7 for i in knee_hip_indices if i != -1]
-            
-            for idx in knee_hip_indices:
-                if idx >= 0:
-                    qpos[joint_indices][idx] = 0.3  # Stronger bend
-        except:
-            pass
-        
-        # Minimal velocities
-        qvel[:] = np.random.normal(0, 0.01, size=qvel.shape)
-    
-    def _apply_random_position(self, qpos, qvel):
-        """Apply a random non-lying position."""
-        # Random height that's not lying down
-        qpos[2] = np.random.uniform(0.5, 1.0)
-        
-        # Random orientation that's reasonably upright
-        angle = np.random.uniform(-0.3, 0.3)
-        axis = np.random.normal(0, 1, 3)
-        axis = axis / np.linalg.norm(axis)
-        sin_a = np.sin(angle/2)
-        qpos[3:7] = [np.cos(angle/2), axis[0]*sin_a, axis[1]*sin_a, axis[2]*sin_a]
-        
-        # Random joint positions
-        joint_indices = slice(7, len(qpos))
-        qpos[joint_indices] = np.random.normal(0, 0.3, size=qpos[joint_indices].shape)
-        
-        # Small random velocities
-        qvel[:] = np.random.normal(0, 0.05, size=qvel.shape)
 
     def step(self, action):
         """Take a step with focus on head height and feet position."""
@@ -213,8 +153,9 @@ class DMCWrapper(gym.Env):
         jump_detected = False
         if max(foot_heights) > 0.3:
             jump_detected = True
-            # Can optionally terminate on jump
-            # terminated = True
+            # Optionally terminate on jump
+            terminated = True
+            reward = -100.0  # Strong penalty for jumping
         
         # Regular truncation for max steps
         truncated = self.steps_this_episode >= self.max_steps
@@ -259,6 +200,15 @@ class DMCWrapper(gym.Env):
             return self.env.physics.torso_height()
         return self.env.physics.named.data.geom_xpos['torso', 'z']
     
+    def _get_foot_heights(self):
+        """Get the heights of the feet."""
+        try:
+            left_foot_height = self.env.physics.named.data.geom_xpos['left_foot', 'z']
+            right_foot_height = self.env.physics.named.data.geom_xpos['right_foot', 'z']
+            return [float(left_foot_height), float(right_foot_height)]
+        except:
+            return [0.1, 0.1]  # Default if lookup fails
+
     def _compute_stand_reward(self):
         """Reward function focused on maximizing head height while keeping feet on ground."""
         physics = self.env.physics
