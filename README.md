@@ -55,9 +55,11 @@ python main.py --mode evaluate --model_path results/humanoid_wave_final.zip
 
 ### Video
 
+For headless systems (which is the recommended approach for servers without a display):
+
 ```bash
-# Generate and save video of the trained model
-python render_video.py --model_path results/humanoid_stand_final.zip --output_path output/humanoid_video.mp4
+# Generate and save video of the trained model using xvfb for headless rendering
+xvfb-run -a python render_video.py --model_path results/humanoid_stand_final.zip --output_path output/humanoid_video.mp4
 ```
 
 **Note**: If you encounter the following error:
@@ -73,9 +75,9 @@ Install the required backend with:
 pip install imageio[ffmpeg]
 ```
 
-For headless systems (like servers without a display), use:
+If you have a display available, you can run without xvfb, but this is not recommended for most server environments:
 ```bash
-xvfb-run -a python render_video.py --model_path results/humanoid_stand_final.zip --output_path output/humanoid_video.mp4
+python render_video.py --model_path results/humanoid_stand_final.zip --output_path output/humanoid_video.mp4
 ```
 
 ## Performance Optimization
