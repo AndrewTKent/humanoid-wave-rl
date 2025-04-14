@@ -167,10 +167,6 @@ def parse_args():
                        help='Enable wandb logging')
     
     # Environment settings
-    parser.add_argument('--initial_standing_assist', type=float, default=0.8,
-                       help='Initial standing assistance level (0.0-1.0)')
-    parser.add_argument('--assist_decay_rate', type=float, default=0.9999,
-                       help='Rate at which standing assistance decays')
     parser.add_argument('--max_steps', type=int, default=1000,
                        help='Maximum steps per episode')
     
@@ -206,15 +202,12 @@ def parse_args():
     return parser.parse_args()
     
 
-def make_env(rank: int, seed: int = 0, initial_standing_assist=0.8, 
-            assist_decay_rate=0.9999, max_steps=1000):
+def make_env(rank: int, seed: int = 0, max_steps=1000):
     """Utility function for creating environments for parallel running."""
     def _init():
         env = DMCWrapper(
             domain_name="humanoid",
             task_name="stand",
-            initial_standing_assist=initial_standing_assist,
-            assist_decay_rate=assist_decay_rate,
             max_steps=max_steps,
             seed=seed + rank
         )
@@ -249,8 +242,7 @@ def train_humanoid_stand(args):
             "n_steps": args.n_steps,
             "batch_size": args.batch_size,
             "net_arch": args.net_arch,
-            "initial_standing_assist": args.initial_standing_assist,
-            "assist_decay_rate": args.assist_decay_rate
+            "max_steps": args.max_steps
         }
         wandb.init(project="humanoid-stand", config=wandb_config)
     
@@ -271,8 +263,6 @@ def train_humanoid_stand(args):
         make_env(
             i, 
             seed=base_seed, 
-            initial_standing_assist=args.initial_standing_assist,
-            assist_decay_rate=args.assist_decay_rate,
             max_steps=args.max_steps
         ) for i in range(num_envs)
     ])
@@ -395,7 +385,6 @@ def evaluate_trained_model(args):
     eval_env = DMCWrapper(
         domain_name="humanoid",
         task_name="stand",
-        initial_standing_assist=0.0,  # No assistance during evaluation
         max_steps=args.max_steps
     )
 
