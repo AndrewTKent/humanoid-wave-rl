@@ -7,14 +7,13 @@ class DMCWrapper(gym.Env):
     """Simplified wrapper focused exclusively on standing."""
 
     def __init__(self, domain_name="humanoid", task_name="stand",
-                 initial_standing_assist=0.9, assist_decay_rate=0.9995, 
                  max_steps=1000, seed=None):
-
+        
         # Load the environment
         random_state = np.random.RandomState(seed) if seed is not None else None
         self.env = suite.load(domain_name=domain_name, task_name=task_name, 
                              task_kwargs={'random': random_state})
-
+        
         # Get observation specs
         obs_spec = self.env.observation_spec()
         if not isinstance(obs_spec, collections.OrderedDict):
@@ -27,7 +26,7 @@ class DMCWrapper(gym.Env):
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(total_obs_dim,), dtype=np.float64
         )
-
+        
         action_spec = self.env.action_spec()
         self.action_space = gym.spaces.Box(
             low=action_spec.minimum.astype(np.float32),
@@ -35,12 +34,7 @@ class DMCWrapper(gym.Env):
             shape=action_spec.shape,
             dtype=np.float32
         )
-
-        # Curriculum parameters - slower decay rate for more assistance time
-        self.initial_standing_assist = initial_standing_assist  # Higher initial assistance
-        self.standing_assist_decay = assist_decay_rate  # Slower decay
-        self.current_standing_assist = initial_standing_assist
-
+        
         # Episode tracking
         self.max_steps = max_steps
         self.steps_this_episode = 0
@@ -55,53 +49,49 @@ class DMCWrapper(gym.Env):
         self.total_reward = 0.0
         # Track previous height for velocity calculation
         self.prev_height = None
-
+                 
     def reset(self, seed=None, options=None):
-        """Reset the environment with different initial poses based on curriculum stage."""
+        """Reset the environment with a standard starting position."""
         if seed is not None:
             super().reset(seed=seed)
             if hasattr(self.env._task, 'random'):
                 self.env._task.random.seed(seed)
-
+        
         time_step = self.env.reset()
-
-        # Choose starting position based on curriculum stage
+        
+        # Apply starting position
         with self.env.physics.reset_context():
             qpos = self.env.physics.data.qpos.copy()
             qvel = self.env.physics.data.qvel.copy()
             
-            # Different starting positions based on curriculum progress
-            if self.current_standing_assist > 0.7:
-                # Early curriculum: start in a standing position with assistance
-                self._apply_standing_position(qpos, qvel)
-            elif self.current_standing_assist > 0.4:
-                # Mid curriculum: start in a crouched position
-                self._apply_crouched_position(qpos, qvel)
-            else:
-                # Late curriculum: start in random non-lying positions
-                self._apply_random_position(qpos, qvel)
-                
+            # Set to a standing position
+            self._apply_standing_position(qpos, qvel)
+            
             # Apply the modified state
             self.env.physics.set_state(np.concatenate([qpos, qvel]))
-
+        
         # Reset episode variables
         self.steps_this_episode = 0
         self.best_height_this_episode = self._get_height()
         self.total_reward = 0.0
         self.lying_down_steps = 0
         self.prev_height = self._get_height()
-
+        
         # Get initial observation and info
         obs = self._flatten_obs(time_step.observation)
-        info = {'standing_assist': self.current_standing_assist, 
-                'height': self._get_height()}
-
+        
+        # Add foot position observation to help with learning
+        foot_heights = self._get_foot_heights()
+        
+        info = {'height': self._get_height(),
+                'foot_heights': foot_heights}
+        
         return obs.astype(np.float32), info
-    
+        
     def _apply_standing_position(self, qpos, qvel):
-        """Apply a stable standing position with assistance."""
+        """Apply a stable standing position with feet firmly on ground."""
         # Set to standing height
-        target_height = 1.35  # Slightly lower than full height for stability
+        target_height = 1.35  # Target humanoid height
         qpos[2] = target_height
         
         # Set perfect upright orientation
@@ -126,6 +116,15 @@ class DMCWrapper(gym.Env):
         
         # Zero all velocities
         qvel[:] = 0.0
+
+    def _get_foot_heights(self):
+        """Get the heights of the feet."""
+        try:
+            left_foot_height = self.env.physics.named.data.geom_xpos['left_foot', 'z']
+            right_foot_height = self.env.physics.named.data.geom_xpos['right_foot', 'z']
+            return [float(left_foot_height), float(right_foot_height)]
+        except:
+            return [0.1, 0.1]  # Default if lookup fails
     
     def _apply_crouched_position(self, qpos, qvel):
         """Apply a crouched starting position."""
@@ -179,7 +178,7 @@ class DMCWrapper(gym.Env):
         qvel[:] = np.random.normal(0, 0.05, size=qvel.shape)
 
     def step(self, action):
-        """Take a step with stronger height-based rewards and early termination."""
+        """Take a step with focus on head height and feet position."""
         action = action.astype(np.float64)
         time_step = self.env.step(action)
         self.steps_this_episode += 1
@@ -187,46 +186,39 @@ class DMCWrapper(gym.Env):
         # Get observation
         obs_flat = self._flatten_obs(time_step.observation).astype(np.float32)
         
-        # Calculate reward with stronger focus on height
+        # Calculate reward focused on head height and feet position
         reward = self._compute_stand_reward()
         self.total_reward += reward
         
         # Determine if done
         terminated = time_step.last()
         
-        # Early termination for falling
+        # Get current heights
         current_height = self._get_height()
-        # Track lying down state
-        if current_height < 0.2:
+        foot_heights = self._get_foot_heights()
+        
+        # Early termination for falling
+        if current_height < 0.3:
             self.lying_down_steps += 1
         else:
             self.lying_down_steps = 0
             
-        # Terminate if lying down for too long (faster termination)
+        # Terminate if lying down for too long
         fall_terminated = False
-        if self.lying_down_steps > 50:  # Terminate faster when lying down
+        if self.lying_down_steps > 20:  # Faster termination when fallen
             fall_terminated = True
             terminated = True
+        
+        # Check for jumping (feet too high off ground)
+        jump_detected = False
+        if max(foot_heights) > 0.3:
+            jump_detected = True
+            # Can optionally terminate on jump
+            # terminated = True
         
         # Regular truncation for max steps
         truncated = self.steps_this_episode >= self.max_steps
         
-        # Update curriculum on episode end
-        if terminated or truncated:
-            # Adjust decay based on performance
-            if self.best_height_this_episode > 1.2:
-                # Very good performance - decay faster
-                self.current_standing_assist *= self.standing_assist_decay * 0.9
-            elif self.best_height_this_episode > 0.8:
-                # Good performance - normal decay
-                self.current_standing_assist *= self.standing_assist_decay
-            else:
-                # Poor performance - decay slower
-                self.current_standing_assist *= self.standing_assist_decay * 1.1
-            
-            # Ensure within bounds
-            self.current_standing_assist = max(0.0, min(self.current_standing_assist, 1.0))
-            
         # Track best height
         if current_height > self.best_height_this_episode:
             self.best_height_this_episode = current_height
@@ -237,10 +229,10 @@ class DMCWrapper(gym.Env):
         # Prepare info dictionary
         info = {
             'height': current_height,
+            'foot_heights': foot_heights,
             'steps': self.steps_this_episode,
-            'standing_assist': self.current_standing_assist,
             'fall_terminated': fall_terminated,
-            'lying_down_steps': self.lying_down_steps,
+            'jump_detected': jump_detected,
             'total_reward': self.total_reward,
             'best_height': self.best_height_this_episode
         }
@@ -249,9 +241,9 @@ class DMCWrapper(gym.Env):
         if terminated or truncated:
             info['final_info'] = {
                 'height': current_height,
+                'foot_heights': foot_heights,
                 'max_height': self.best_height_this_episode,
                 'steps': self.steps_this_episode,
-                'standing_assist': self.current_standing_assist,
                 'total_reward': self.total_reward,
                 'terminal_observation': obs_flat,
             }
@@ -266,78 +258,55 @@ class DMCWrapper(gym.Env):
         if hasattr(self.env.physics, 'torso_height'):
             return self.env.physics.torso_height()
         return self.env.physics.named.data.geom_xpos['torso', 'z']
-
+    
     def _compute_stand_reward(self):
-        """Completely redesigned reward focused on balance and learning to stand."""
+        """Reward function focused on maximizing head height while keeping feet on ground."""
         physics = self.env.physics
-        current_height = self._get_height()
         
-        # Check if feet are on ground (approximate)
+        # Get head height and feet positions
+        try:
+            head_height = physics.named.data.geom_xpos['head', 'z']
+        except:
+            # If head lookup fails, use torso height as approximation
+            head_height = self._get_height()
+        
+        # Get feet positions
         try:
             left_foot_height = physics.named.data.geom_xpos['left_foot', 'z'] 
             right_foot_height = physics.named.data.geom_xpos['right_foot', 'z']
-            feet_on_ground = (left_foot_height < 0.1) and (right_foot_height < 0.1)
+            avg_foot_height = (left_foot_height + right_foot_height) / 2.0
+            
+            # Penalty for feet leaving the ground - exponential penalty
+            feet_penalty = 100.0 * (avg_foot_height ** 2)
         except:
-            # If foot lookup fails, assume feet are on ground
-            feet_on_ground = True
+            # If foot lookup fails, assume neutral 
+            avg_foot_height = 0.1
+            feet_penalty = 10.0  # Default small penalty
         
-        # Massive penalty for lying flat
-        if current_height < 0.2:
-            return -50.0  # Extremely negative - being flat is catastrophic
-        
-        # Strong penalty for being very low but not flat
-        if current_height < 0.5:
-            return -20.0 + current_height * 10.0  # Less penalty as height increases
-        
-        # Calculate centerline shift (balance indicator)
-        try:
-            head_pos = physics.named.data.geom_xpos['head', 'x':'y']
-            feet_center = (physics.named.data.geom_xpos['left_foot', 'x':'y'] + 
-                          physics.named.data.geom_xpos['right_foot', 'x':'y']) / 2.0
-            balance_offset = np.linalg.norm(head_pos - feet_center)
-            # Balance reward - being well-centered is good
-            balance_factor = max(0, 1.0 - balance_offset)
-        except:
-            # If body part lookup fails, use simplified balance
-            balance_factor = 0.5  # Default middle value
-        
-        # Height reward - exponential with height
-        height_factor = 30.0 * (current_height / 1.4)**2 if current_height < 1.4 else 30.0
-        
-        # Uprightness reward
+        # Calculate torso uprightness for stability
         torso_z_axis = physics.named.data.xmat['torso'][6:9]
         upright_value = max(0.0, torso_z_axis[2])**2  # Squared for stronger gradient
         upright_reward = 20.0 * upright_value
         
-        # Velocity control - reward low velocity when standing, penalize excessive
+        # Calculate velocity penalty - discourage jumping/excessive movement
         vel = physics.data.qvel.copy()
         vel_norm = np.linalg.norm(vel)
-        vel_reward = 5.0 * np.exp(-0.5 * vel_norm) if current_height > 1.0 else 0.0
+        vel_penalty = 10.0 * vel_norm if vel_norm > 0.5 else 0.0
         
-        # Upward movement reward - encourage getting up
-        height_change = 0
-        if self.prev_height is not None:
-            height_change = current_height - self.prev_height
-            # Only reward significant upward movement
-            if height_change > 0.01 and current_height < 1.3:
-                height_change_reward = 10.0 * height_change
-            else:
-                height_change_reward = 0.0
-        else:
-            height_change_reward = 0.0
+        # Main reward: maximize head height while keeping feet on ground
+        head_height_reward = 50.0 * head_height 
         
         # Total reward
         total_reward = (
-            height_factor + 
-            upright_reward + 
-            10.0 * balance_factor + 
-            vel_reward + 
-            height_change_reward
+            head_height_reward +  # Reward high head position
+            upright_reward -     # Reward being upright
+            feet_penalty -       # Penalize feet off ground
+            vel_penalty          # Penalize excessive velocity
         )
         
-        # If agent is in a good standing position, give big bonus
-        if current_height > 1.2 and upright_value > 0.9 and feet_on_ground:
-            total_reward += 50.0
+        # Terminate with massive penalty if completely fallen
+        if head_height < 0.3:
+            return -100.0
         
         return total_reward
 
