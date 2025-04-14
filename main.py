@@ -34,20 +34,20 @@ class ProgressCallback(BaseCallback):
 
     def _on_step(self):
         """Called after each step of the environment"""
-        # Accumulate rewards and lengths
+        # Accumulate rewards and lengths for the first environment
         self.current_episode_reward += self.locals['rewards'][0]
         self.current_episode_length += 1
 
-        # Check if episode is done
+        # Check if episode is done for the first environment
         if self.locals['dones'][0]:
             self.episode_rewards.append(self.current_episode_reward)
             self.episode_lengths.append(self.current_episode_length)
-            # Log to wandb
+            # Log episode metrics to wandb with "episode/" prefix
             wandb.log({
-                "episode_reward": self.current_episode_reward,
-                "episode_length": self.current_episode_length,
-                "stand_reward": self.locals['infos'][0].get('stand_reward', 0),
-                "wave_reward": self.locals['infos'][0].get('wave_reward', 0),
+                "episode/reward": self.current_episode_reward,
+                "episode/length": self.current_episode_length,
+                "episode/stand_reward": self.locals['infos'][0].get('stand_reward', 0),
+                "episode/wave_reward": self.locals['infos'][0].get('wave_reward', 0),
             })
             # Reset episode accumulators
             self.current_episode_reward = 0
@@ -69,6 +69,20 @@ class ProgressCallback(BaseCallback):
             self.last_percent = percent
 
         return True
+
+    def _on_rollout_end(self):
+        """Called after each policy update"""
+        # Log training metrics to wandb with "train/" prefix
+        metrics = self.logger.name_to_value
+        wandb.log({
+            "train/explained_variance": metrics.get("explained_variance", 0),
+            "train/policy_loss": metrics.get("policy_gradient_loss", 0),
+            "train/value_loss": metrics.get("value_loss", 0),
+            "train/entropy_loss": metrics.get("entropy_loss", 0),
+            "train/clip_fraction": metrics.get("clip_fraction", 0),
+            "train/approx_kl": metrics.get("approx_kl", 0),
+            "timesteps": self.num_timesteps,
+        })
 
 
 def parse_args():
