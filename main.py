@@ -328,7 +328,7 @@ def train_humanoid_stand(args):
     eval_env = DMCWrapper(
         domain_name="humanoid",
         task_name="stand",
-        initial_standing_assist=0.0  # No assistance during evaluation
+        max_steps=args.max_steps
     )
     
     # Evaluate the model
