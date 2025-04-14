@@ -7,7 +7,9 @@ class DMCWrapper(gym.Env):
     """Wrapper for humanoid standing with focus on head height and feet on ground."""
 
     def __init__(self, domain_name="humanoid", task_name="stand",
-                 max_steps=1000, seed=None):
+                 max_steps=1000, seed=None, 
+                 lying_down_threshold=30,  # Number of steps before terminating when lying down
+                 init_randomization=0.05):  # Amount of randomization in initial pose (0-1)
 
         # Load the environment
         random_state = np.random.RandomState(seed) if seed is not None else None
@@ -40,6 +42,8 @@ class DMCWrapper(gym.Env):
         self.steps_this_episode = 0
         self.best_height_this_episode = 0.0
         self.lying_down_steps = 0  # Track how long agent has been lying down
+        self.lying_down_threshold = lying_down_threshold  # Threshold for early termination
+        self.init_randomization = init_randomization  # Amount of randomization in initial pose
         
         # Metadata for rendering
         self.metadata = {'render_modes': ['human', 'rgb_array'], 
@@ -64,8 +68,8 @@ class DMCWrapper(gym.Env):
             qpos = self.env.physics.data.qpos.copy()
             qvel = self.env.physics.data.qvel.copy()
             
-            # Set to a standing position
-            self._apply_standing_position(qpos, qvel)
+            # Set to a standing position with optional randomization
+            self._apply_standing_position(qpos, qvel, randomize=self.init_randomization)
             
             # Apply the modified state
             self.env.physics.set_state(np.concatenate([qpos, qvel]))
@@ -88,14 +92,34 @@ class DMCWrapper(gym.Env):
 
         return obs.astype(np.float32), info
     
-    def _apply_standing_position(self, qpos, qvel):
-        """Apply a stable standing position with feet firmly on ground."""
+    def _apply_standing_position(self, qpos, qvel, randomize=0.0):
+        """Apply a stable standing position with feet firmly on ground.
+        
+        Args:
+            qpos: Position state to modify
+            qvel: Velocity state to modify
+            randomize: Amount of randomization to apply (0.0 = none, 1.0 = maximum)
+        """
         # Set to standing height
         target_height = 1.35  # Target humanoid height
         qpos[2] = target_height
         
-        # Set perfect upright orientation
-        qpos[3:7] = [1.0, 0.0, 0.0, 0.0]  # Perfect upright quaternion
+        # Set perfect upright orientation with slight randomization
+        if randomize > 0.0:
+            # Small random perturbation to orientation (mainly around vertical axis)
+            # w component stays close to 1 for stability
+            w = 1.0 - randomize * 0.1 * np.random.random()  # Keep w close to 1
+            # Small random values for x,y components (pitch/roll)
+            x = randomize * 0.1 * (np.random.random() - 0.5)
+            y = randomize * 0.1 * (np.random.random() - 0.5)
+            # Slightly larger randomization for z component (yaw)
+            z = randomize * 0.2 * (np.random.random() - 0.5)
+            
+            # Normalize quaternion
+            norm = np.sqrt(w*w + x*x + y*y + z*z)
+            qpos[3:7] = [w/norm, x/norm, y/norm, z/norm]
+        else:
+            qpos[3:7] = [1.0, 0.0, 0.0, 0.0]  # Perfect upright quaternion
         
         # Set balanced joint positions - slight knee bend for stability
         joint_indices = slice(7, len(qpos))
@@ -108,14 +132,68 @@ class DMCWrapper(gym.Env):
                           self.env.physics.model.name2id('right_knee', 'joint')]
             knee_indices = [i-7 for i in knee_indices if i != -1]  # Adjust to local indices
             
+            # Find hip indices if available
+            hip_indices = []
+            for joint_name in ['left_hip_x', 'left_hip_y', 'left_hip_z', 
+                              'right_hip_x', 'right_hip_y', 'right_hip_z']:
+                try:
+                    idx = self.env.physics.model.name2id(joint_name, 'joint')
+                    if idx != -1:
+                        hip_indices.append(idx-7)  # Adjust to local indices
+                except:
+                    pass
+                    
+            # Find ankle indices if available
+            ankle_indices = []
+            for joint_name in ['left_ankle', 'right_ankle']:
+                try:
+                    idx = self.env.physics.model.name2id(joint_name, 'joint')
+                    if idx != -1:
+                        ankle_indices.append(idx-7)  # Adjust to local indices
+                except:
+                    pass
+            
+            # Set knee bend
             for idx in knee_indices:
                 if idx >= 0:
-                    qpos[joint_indices][idx] = 0.1  # Slight knee bend
-        except:
+                    # Base knee bend with optional randomization
+                    base_knee_angle = 0.1
+                    if randomize > 0.0:
+                        knee_random = randomize * 0.05 * np.random.random()
+                        qpos[joint_indices][idx] = base_knee_angle + knee_random
+                    else:
+                        qpos[joint_indices][idx] = base_knee_angle
+                        
+            # Set slight hip flexion for better balance
+            for idx in hip_indices:
+                if idx >= 0:
+                    # Only apply to y-axis (forward/backward) hip joints
+                    if 'hip_y' in self.env.physics.model.id2name(idx+7, 'joint'):
+                        base_hip_angle = 0.05  # Slight forward lean
+                        if randomize > 0.0:
+                            hip_random = randomize * 0.03 * (np.random.random() - 0.5)
+                            qpos[joint_indices][idx] = base_hip_angle + hip_random
+                        else:
+                            qpos[joint_indices][idx] = base_hip_angle
+            
+            # Set slight ankle flexion for stable base
+            for idx in ankle_indices:
+                if idx >= 0:
+                    base_ankle_angle = -0.05  # Slight backward ankle angle to balance knee bend
+                    if randomize > 0.0:
+                        ankle_random = randomize * 0.03 * (np.random.random() - 0.5)
+                        qpos[joint_indices][idx] = base_ankle_angle + ankle_random
+                    else:
+                        qpos[joint_indices][idx] = base_ankle_angle
+        
+        except Exception as e:
             pass  # If joint lookup fails, continue with default pose
         
-        # Zero all velocities
-        qvel[:] = 0.0
+        # Zero all velocities with optional tiny random values for robustness
+        if randomize > 0.0:
+            qvel[:] = randomize * 0.01 * np.random.randn(*qvel.shape)
+        else:
+            qvel[:] = 0.0
 
     def step(self, action):
         """Take a step with focus on head height and feet position."""
@@ -144,7 +222,9 @@ class DMCWrapper(gym.Env):
             self.lying_down_steps = 0
             
         # Terminate if lying down for too long
-        fall_terminated = False
+        fall_terminated = self.lying_down_steps >= self.lying_down_threshold
+        # Update terminated state if the agent has fallen
+        terminated = terminated or fall_terminated
 
         # Check for jumping (feet too high off ground)
         jump_detected = False
