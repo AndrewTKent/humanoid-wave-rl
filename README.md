@@ -53,6 +53,31 @@ python main.py --total_timesteps 2000000 --num_envs 32
 python main.py --mode evaluate --model_path results/humanoid_wave_final.zip
 ```
 
+### Video
+
+```bash
+# Generate and save video of the trained model
+python render_video.py --model_path results/humanoid_stand_final.zip --output_path output/humanoid_video.mp4
+```
+
+**Note**: If you encounter the following error:
+```
+ValueError: Could not find a backend to open `output/humanoid_video.mp4`` with iomode `wI`.
+Based on the extension, the following plugins might add capable backends:
+  FFMPEG:  pip install imageio[ffmpeg]
+  pyav:  pip install imageio[pyav]
+```
+
+Install the required backend with:
+```bash
+pip install imageio[ffmpeg]
+```
+
+For headless systems (like servers without a display), use:
+```bash
+xvfb-run -a python render_video.py --model_path results/humanoid_stand_final.zip --output_path output/humanoid_video.mp4
+```
+
 ## Performance Optimization
 
 The implementation includes several optimizations for better performance:
