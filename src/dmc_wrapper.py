@@ -3,9 +3,10 @@ import numpy as np
 from dm_control import suite
 
 class DMCWrapper(gym.Env):
-    """Wrapper for dm_control environments to make them compatible with Gymnasium."""
+    """Wrapper for dm_control environments to make them compatible with Gymnasium.
+    Enhanced with curriculum learning and reward shaping for better standing and waving."""
     
-    def __init__(self, enable_waving=True):
+    def __init__(self, enable_waving=True, initial_standing_assist=0.8, max_steps=1000):
         # Load the environment
         self.env = suite.load(domain_name="humanoid", task_name="stand")
         
@@ -32,6 +33,17 @@ class DMCWrapper(gym.Env):
         # Flag to enable/disable waving behavior
         self.enable_waving = enable_waving
         
+        # Add initial standing assistance (curriculum learning)
+        self.initial_standing_assist = initial_standing_assist
+        self.standing_assist_decay = 0.9999  # Decay factor per episode
+        self.current_standing_assist = initial_standing_assist
+        
+        # Track progress for early termination
+        self.max_steps = max_steps
+        self.steps_this_episode = 0
+        self.best_height_this_episode = 0
+        self.no_progress_steps = 0
+        
         # Initialize waving-related variables only if waving is enabled
         if self.enable_waving:
             self.prev_arm_positions = None
@@ -49,6 +61,37 @@ class DMCWrapper(gym.Env):
         # Reset the dm_control environment
         time_step = self.env.reset()
         
+        # Apply standing assistance (raise the humanoid partly upright)
+        if self.current_standing_assist > 0:
+            with self.env.physics.reset_context():
+                # Modify initial state to help the humanoid start more upright
+                # Slightly randomize starting position for better generalization
+                self.env.physics.data.qpos[2] = 1.2 * self.current_standing_assist  # Raise z position
+                
+                # Set torso orientation to be more upright
+                # Quaternion representing upright orientation with small random perturbation
+                quat_noise = (np.random.rand(4) - 0.5) * 0.2 * (1 - self.current_standing_assist)
+                upright_quat = np.array([1.0, 0.0, 0.0, 0.0]) + quat_noise
+                upright_quat = upright_quat / np.linalg.norm(upright_quat)  # Normalize quaternion
+                self.env.physics.data.qpos[3:7] = upright_quat
+                
+                # Also set joint angles to be closer to standing position
+                # This is approximate and depends on the specific humanoid model
+                for i in range(7, len(self.env.physics.data.qpos)):
+                    # Add small random perturbations to joints
+                    self.env.physics.data.qpos[i] = np.random.normal(0, 0.1 * (1 - self.current_standing_assist))
+                
+                # Set zero velocity initially for stability
+                self.env.physics.data.qvel[:] = 0
+            
+            # Decay standing assistance for curriculum learning
+            self.current_standing_assist *= self.standing_assist_decay
+        
+        # Reset progress tracking
+        self.steps_this_episode = 0
+        self.best_height_this_episode = 0
+        self.no_progress_steps = 0
+        
         # Reset wave tracking variables only if waving is enabled
         if self.enable_waving:
             self.prev_arm_positions = None
@@ -61,36 +104,61 @@ class DMCWrapper(gym.Env):
         
     def step(self, action):
         """Take a step in the environment."""
+        # Increment step counter
+        self.steps_this_episode += 1
+        
         # Execute action in the dm_control environment
         time_step = self.env.step(action)
         
         # Get flattened observation
         obs = self._flatten_obs(time_step.observation)
         
-        # Get the stand reward (or 0 if None)
-        stand_reward = float(time_step.reward) if time_step.reward is not None else 0.0
+        # Get current height for tracking progress
+        current_height = time_step.observation['body_height'][0]
         
-        # Compute wave reward only if waving is enabled
-        if self.enable_waving:
+        # Track best height achieved this episode
+        if current_height > self.best_height_this_episode:
+            self.best_height_this_episode = current_height
+            self.no_progress_steps = 0
+        else:
+            self.no_progress_steps += 1
+        
+        # Check for early termination due to lack of progress
+        # After 200 steps with no height improvement, terminate if height is still low
+        early_termination = False
+        if self.no_progress_steps > 200 and current_height < 0.8:
+            early_termination = True
+        
+        # Compute enhanced stand reward with reward shaping
+        stand_reward = self._compute_stand_reward(time_step.observation)
+        
+        # Compute wave reward only if waving is enabled and standing is achieved
+        if self.enable_waving and current_height > 1.0:  # Only enable waving when sufficiently upright
             wave_reward = self._compute_wave_reward(time_step.observation)
-            progress_factor = min(1.0, self.wave_counter / 1000)
-            total_reward = stand_reward + 0.3 * progress_factor * wave_reward
+            # Progressive curriculum: introduce wave reward more strongly as standing improves
+            progress_factor = min(1.0, max(0.0, (current_height - 1.0) / 0.5))  # Scale from 0 to 1 as height increases
+            wave_weight = 0.3 * min(1.0, self.wave_counter / 1000) * progress_factor
+            total_reward = stand_reward + wave_weight * wave_reward
             self.wave_counter += 1
         else:
             wave_reward = 0.0
             total_reward = stand_reward
         
         # Check if episode is done
-        done = time_step.last()
+        done = time_step.last() or early_termination or self.steps_this_episode >= self.max_steps
         
-        # Additional info dict with reward components
+        # Additional info dict with reward components and diagnostics
         info = {
             'stand_reward': stand_reward,
-            'wave_reward': wave_reward
+            'wave_reward': wave_reward,
+            'height': current_height,
+            'steps': self.steps_this_episode,
+            'standing_assist': self.current_standing_assist,
+            'early_termination': early_termination
         }
         
         # Gym requires both terminated and truncated flags
-        truncated = False
+        truncated = self.steps_this_episode >= self.max_steps
         
         return obs, total_reward, done, truncated, info
         
@@ -100,6 +168,43 @@ class DMCWrapper(gym.Env):
             np.array(v, dtype=np.float32).flatten() 
             for v in obs_dict.values()
         ])
+    
+    def _compute_stand_reward(self, observation):
+        """Enhanced reward shaping for standing."""
+        # Get base reward from DM Control
+        stand_reward = float(self.env._task.get_reward(self.env.physics))
+        
+        # Extract useful state information
+        height = observation['body_height'][0]
+        velocity = np.linalg.norm(observation['velocity'][0:3])  # Linear velocity
+        
+        # Add intermediate rewards for partial progress
+        height_reward = min(height * 2.0, 2.0)  # Reward for just being higher off the ground
+        
+        # Orientation reward - reward being upright
+        upright_reward = 0.0
+        if 'orientation' in observation:
+            z_orient = observation['orientation'][2]  # Z component often indicates upright orientation
+            upright_reward = max(0.0, z_orient) * 1.5  # Reward for being more upright
+        
+        # Stability reward - discourage excessive velocity/jittering
+        stability_reward = -0.1 * min(velocity, 2.0)  # Penalty for moving too fast
+        
+        # Joint position/angle reward - encourage natural standing pose
+        joint_reward = 0.0
+        if 'joint_angles' in observation:
+            # Simplified: reward keeping joint angles close to 0 (natural pose)
+            joint_angles = observation['joint_angles']
+            joint_penalty = np.sum(np.square(joint_angles)) * 0.05
+            joint_reward = -min(joint_penalty, 1.0)
+        
+        # Combined shaped reward
+        shaped_reward = stand_reward + height_reward + upright_reward + stability_reward + joint_reward
+        
+        # Scale reward based on curriculum progress
+        curriculum_scale = 1.0 + max(0.0, 2.0 * (1.0 - self.current_standing_assist))
+        
+        return shaped_reward * curriculum_scale
     
     def _compute_wave_reward(self, observation):
         """Compute reward for wave-like motion of the right arm."""
@@ -123,18 +228,28 @@ class DMCWrapper(gym.Env):
         shoulder_delta = arm_positions[0] - self.prev_arm_positions[0]
         
         # Detect direction change (essential for waving)
-        if self.prev_arm_positions[0] > 0.2:  # If arm is elevated
-            if (shoulder_delta > 0.05 and self.prev_delta < -0.05) or \
-               (shoulder_delta < -0.05 and self.prev_delta > 0.05):
+        if arm_positions[0] > 0.2:  # If arm is elevated
+            # More sensitive detection of direction changes
+            if (shoulder_delta > 0.03 and self.prev_delta < -0.03) or \
+               (shoulder_delta < -0.03 and self.prev_delta > 0.03):
                 self.direction_changes += 1
                 wave_reward += 1.0  # Reward for direction change while elevated
         
-        # Reward for keeping arm elevated (above horizontal)
-        if arm_positions[0] > 0.3:
-            wave_reward += 0.2
+        # Progressive reward for arm elevation
+        # The higher the arm, the better (up to a point)
+        elevation_reward = min(max(0, arm_positions[0]) * 3.0, 1.5)
+        wave_reward += elevation_reward
+        
+        # Reward for holding arm out (away from body)
+        if abs(arm_positions[1]) > 0.2:  # Second joint controls side movement
+            wave_reward += 0.3
         
         # Extra reward for multiple direction changes (sustained waving)
-        wave_reward += 0.1 * min(10, self.direction_changes)
+        wave_reward += 0.2 * min(10, self.direction_changes)
+        
+        # Bonus for frequency - faster waving (if not too fast)
+        if 0.05 < abs(shoulder_delta) < 0.2:
+            wave_reward += 0.2
         
         # Store current positions for next step
         self.prev_arm_positions = arm_positions.copy()
