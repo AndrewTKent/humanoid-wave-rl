@@ -4,10 +4,10 @@ from dm_control import suite
 import collections
 
 class DMCWrapper(gym.Env):
-    """Simplified wrapper for dm_control humanoid environments focused on standing."""
+    """Simplified wrapper focused exclusively on standing."""
 
     def __init__(self, domain_name="humanoid", task_name="stand",
-                 initial_standing_assist=0.8, assist_decay_rate=0.9999, 
+                 initial_standing_assist=0.8, assist_decay_rate=0.999, 
                  max_steps=1000, seed=None):
 
         # Load the environment
@@ -36,22 +36,25 @@ class DMCWrapper(gym.Env):
             dtype=np.float32
         )
 
-        # Curriculum learning parameters
+        # Curriculum learning parameters - faster decay
         self.initial_standing_assist = initial_standing_assist
-        self.standing_assist_decay = assist_decay_rate
+        self.standing_assist_decay = assist_decay_rate  # More aggressive decay
         self.current_standing_assist = initial_standing_assist
 
         # Episode tracking
         self.max_steps = max_steps
         self.steps_this_episode = 0
         self.best_height_this_episode = 0.0
-
+        
         # Metadata for rendering
         self.metadata = {'render_modes': ['human', 'rgb_array'], 
                          'render_fps': int(1.0 / self.env.physics.timestep())}
+        
+        # Track rewards for debugging
+        self.total_reward = 0.0
 
     def reset(self, seed=None, options=None):
-        """Reset the environment with standing assistance."""
+        """Reset with more effective assistance."""
         if seed is not None:
             super().reset(seed=seed)
             if hasattr(self.env._task, 'random'):
@@ -65,33 +68,44 @@ class DMCWrapper(gym.Env):
                 qpos = self.env.physics.data.qpos.copy()
                 qvel = self.env.physics.data.qvel.copy()
 
-                # Raise initial height
-                target_height = 1.2 + 0.2 * np.random.uniform(-0.5, 0.5)
+                # 1. Higher initial position
+                target_height = 1.4  # Aim for standing height
                 qpos[2] = target_height * self.current_standing_assist + qpos[2] * (1 - self.current_standing_assist)
 
-                # Set torso orientation closer to upright
-                noise = (np.random.rand(3) - 0.5) * 0.3 * (1 - self.current_standing_assist)
-                qpos[4:7] += noise
-                qpos[3:7] /= np.linalg.norm(qpos[3:7])
+                # 2. Stronger upright orientation
+                # Target quaternion - perfectly upright
+                target_quat = np.array([1.0, 0.0, 0.0, 0.0])  
+                current_quat = qpos[3:7].copy()
+                # Blend between current and target - stronger bias toward upright
+                qpos[3:7] = current_quat * (1 - self.current_standing_assist) + target_quat * self.current_standing_assist
+                qpos[3:7] /= np.linalg.norm(qpos[3:7])  # Normalize quaternion
 
-                # Dampen initial velocities
-                qvel[:] *= (1 - self.current_standing_assist)
+                # 3. Reset joint angles to neutral standing pose
+                joint_indices = slice(7, len(qpos))
+                # Set small random values near zero - neutral pose
+                qpos[joint_indices] = np.random.normal(0, 0.05 * (1 - self.current_standing_assist), 
+                                                      size=qpos[joint_indices].shape)
                 
-                # Apply modified state
+                # 4. Zero out velocities completely for stability
+                qvel[:] = 0.0
+                
+                # Apply the modified state
                 self.env.physics.set_state(np.concatenate([qpos, qvel]))
 
         # Reset episode variables
         self.steps_this_episode = 0
         self.best_height_this_episode = self._get_height()
+        self.total_reward = 0.0
 
         # Get initial observation and info
         obs = self._flatten_obs(time_step.observation)
-        info = {'standing_assist': self.current_standing_assist}
+        info = {'standing_assist': self.current_standing_assist, 
+                'height': self._get_height()}
 
         return obs.astype(np.float32), info
 
     def step(self, action):
-        """Take a step and calculate standing reward."""
+        """Take a step with stronger height-based rewards."""
         action = action.astype(np.float64)
         time_step = self.env.step(action)
         self.steps_this_episode += 1
@@ -99,19 +113,38 @@ class DMCWrapper(gym.Env):
         # Get observation
         obs_flat = self._flatten_obs(time_step.observation).astype(np.float32)
         
-        # Calculate stand reward
+        # Calculate reward with stronger focus on height
         reward = self._compute_stand_reward()
+        self.total_reward += reward
         
-        # Check termination conditions
+        # Determine if done
         terminated = time_step.last()
+        
+        # Early termination for falling
+        current_height = self._get_height()
+        # Terminate if fallen and stayed down for a while
+        fall_terminated = False
+        if current_height < 0.3 and self.steps_this_episode > 100:
+            fall_terminated = True
+            terminated = True
+        
+        # Regular truncation for max steps
         truncated = self.steps_this_episode >= self.max_steps
         
         # Update curriculum on episode end
         if terminated or truncated:
-            self.current_standing_assist = max(0.0, self.current_standing_assist * self.standing_assist_decay)
-        
+            # More aggressive decay based on performance
+            if current_height > 1.0:
+                # Good performance - decay faster
+                self.current_standing_assist *= self.standing_assist_decay * 0.95
+            else:
+                # Poor performance - decay slower
+                self.current_standing_assist *= self.standing_assist_decay
+            
+            # Ensure it doesn't go below zero
+            self.current_standing_assist = max(0.0, self.current_standing_assist)
+            
         # Track best height
-        current_height = self._get_height()
         if current_height > self.best_height_this_episode:
             self.best_height_this_episode = current_height
             
@@ -120,6 +153,8 @@ class DMCWrapper(gym.Env):
             'height': current_height,
             'steps': self.steps_this_episode,
             'standing_assist': self.current_standing_assist,
+            'fall_terminated': fall_terminated,
+            'total_reward': self.total_reward
         }
         
         # Add final info for episode end
@@ -129,6 +164,7 @@ class DMCWrapper(gym.Env):
                 'max_height': self.best_height_this_episode,
                 'steps': self.steps_this_episode,
                 'standing_assist': self.current_standing_assist,
+                'total_reward': self.total_reward,
                 'terminal_observation': obs_flat,
             }
         
@@ -144,23 +180,28 @@ class DMCWrapper(gym.Env):
         return self.env.physics.named.data.geom_xpos['torso', 'z']
 
     def _compute_stand_reward(self):
-        """Simplified reward focusing on standing height and orientation."""
+        """Stronger height-based reward function with specific penalty for lying down."""
         physics = self.env.physics
         current_height = self._get_height()
         
-        # Height reward - the main component
-        target_height = 1.4
-        height_threshold = 0.6
-        
-        if current_height < height_threshold:
-            height_reward = current_height * 0.5
+        # Strong specific penalty for lying down (height < 0.2)
+        if current_height < 0.2:
+            # Very large penalty for lying flat
+            height_reward = -20.0
+        elif current_height < 0.4:
+            # Moderate penalty for being very low but not completely flat
+            height_reward = -5.0
         else:
-            height_diff = current_height - height_threshold
-            height_reward = 5.0 * (1.0 - np.exp(-3.0 * height_diff))
+            # Exponential reward that grows rapidly with height
+            target_height = 1.4
+            min_height = 0.4
+            height_factor = 20.0
+            normalized_height = (current_height - min_height) / (target_height - min_height)
+            height_reward = height_factor * (np.exp(2 * normalized_height) - 1)
             
-            # Bonus for getting close to target height
+            # Huge bonus for reaching near standing height
             if current_height > target_height * 0.9:
-                height_reward += 3.0
+                height_reward += 50.0
         
         # Upright orientation reward
         upright_reward = 0.0
@@ -171,19 +212,25 @@ class DMCWrapper(gym.Env):
             torso_z_axis = physics.named.data.xmat['torso'][6:9]
             upright_value = max(0.0, torso_z_axis[2])
         
-        upright_reward = 2.0 * upright_value
+        # Stronger upright reward
+        upright_reward = 10.0 * (upright_value ** 2)  # Quadratic reward for uprightness
         
-        # Combine rewards
-        total_reward = height_reward + upright_reward
+        # Velocity penalty - discourage excessive movement
+        if current_height > 0.8:  # Only apply when somewhat standing
+            velocity = physics.data.qvel.copy()
+            vel_norm = np.linalg.norm(velocity)
+            # Penalize only high velocities
+            vel_penalty = -1.0 * max(0, vel_norm - 2.0) if vel_norm > 2.0 else 0.0
+        else:
+            vel_penalty = 0.0
         
-        # Scale reward based on difficulty
-        curriculum_scale = 1.0 + (1.0 - self.current_standing_assist)
-        total_reward *= curriculum_scale
+        # Total reward
+        total_reward = height_reward + upright_reward + vel_penalty
         
         return total_reward
 
     def _flatten_obs(self, obs_dict):
-        """Flatten the observation dictionary into a 1D array."""
+        """Flatten observation dictionary."""
         obs_list = []
         for key in self._obs_keys:
             val = obs_dict[key]
