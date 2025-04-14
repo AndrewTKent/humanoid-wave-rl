@@ -25,12 +25,11 @@ def record_video_headless(model_path, output_path, num_frames=500, max_steps=100
     print(f"Recording video to {output_path}...")
     
     # Create environment with NO assistance for proper evaluation
-    env = DMCWrapper(
-        domain_name="humanoid",
-        task_name="stand",
-        initial_standing_assist=0.0,  # No assistance for evaluation
-        max_steps=max_steps
-    )
+        env = DMCWrapper(
+            domain_name="humanoid",
+            task_name="stand",
+            max_steps=max_steps
+        )
     
     # Reset with a specific seed for reproducibility
     obs, _ = env.reset(seed=42)
