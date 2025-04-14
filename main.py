@@ -25,7 +25,7 @@ from src.visualization import evaluate_model #, record_video, record_closeup_vid
 class ProgressCallback(BaseCallback):
     """
     Custom callback for printing training progress and logging to wandb.
-    Fixed to initialize properly without requiring model to be set.
+    Fixed array broadcasting issues.
     """
     def __init__(self, total_timesteps, num_envs=1, verbose=0):
         super(ProgressCallback, self).__init__(verbose)
@@ -35,6 +35,7 @@ class ProgressCallback(BaseCallback):
         self.episode_rewards = []
         self.episode_lengths = []
         # Initialize with specified num_envs instead of accessing model.env
+        self.num_envs = num_envs
         self.current_episode_reward = np.zeros(num_envs)
         self.current_episode_length = np.zeros(num_envs)
         self.max_height_reached = np.zeros(num_envs)
@@ -43,41 +44,70 @@ class ProgressCallback(BaseCallback):
 
     def _on_step(self):
         """Called after each step of the environment"""
-        # Accumulate rewards and lengths per environment
-        self.current_episode_reward += self.locals['rewards']
+        # Accumulate rewards safely - handle scalar, vector, or matrix rewards
+        rewards = self.locals['rewards']
+        if isinstance(rewards, (int, float)):
+            # Handle scalar reward
+            self.current_episode_reward += rewards
+        elif np.isscalar(rewards):
+            # Handle numpy scalar
+            self.current_episode_reward += float(rewards)
+        else:
+            # Handle array rewards - ensure proper broadcasting
+            rewards_array = np.asarray(rewards)
+            if rewards_array.ndim == 1 and len(rewards_array) == self.num_envs:
+                # Rewards is a 1D array matching num_envs
+                self.current_episode_reward += rewards_array
+            elif rewards_array.ndim > 1:
+                # If rewards has multiple dimensions, use the first dimension
+                # This handles the case of rewards being a 2D array
+                self.current_episode_reward += rewards_array[:, 0] if rewards_array.shape[0] == self.num_envs else rewards_array[0, :]
+            else:
+                # Fallback - try to make it work with broadcasting
+                try:
+                    self.current_episode_reward += rewards_array
+                except ValueError:
+                    # If broadcasting fails, just increment by zeros (skip this reward)
+                    print(f"Warning: Reward broadcasting failed. Shape: {rewards_array.shape}, expected: {self.current_episode_reward.shape}")
+                    pass
+
+        # Safe increment for episode length
         self.current_episode_length += 1
 
-        # Track max heights per environment
-        for i in range(len(self.locals['infos'])):
-            if 'height' in self.locals['infos'][i]:
-                self.max_height_reached[i] = max(self.max_height_reached[i], self.locals['infos'][i]['height'])
+        # Track max heights per environment - with error handling
+        if 'infos' in self.locals and len(self.locals['infos']) > 0:
+            for i in range(min(len(self.locals['infos']), self.num_envs)):
+                info = self.locals['infos'][i]
+                if info is not None and 'height' in info:
+                    self.max_height_reached[i] = max(self.max_height_reached[i], info['height'])
 
-            # Check if episode is done for each environment
-            if self.locals['dones'][i]:
-                info = self.locals['infos'][i].get("final_info", self.locals['infos'][i]) # Handle VecEnv termination signal
+                # Check if episode is done for this environment
+                if 'dones' in self.locals and i < len(self.locals['dones']) and self.locals['dones'][i]:
+                    # Get appropriate info dictionary
+                    episode_info = info.get("final_info", info) if info is not None else {}
 
-                # Log episode metrics to wandb with "episode/" prefix
-                log_data = {
-                    "episode/reward": self.current_episode_reward[i],
-                    "episode/length": self.current_episode_length[i],
-                    "episode/stand_reward": info.get('stand_reward', 0),
-                    "episode/wave_reward": info.get('wave_reward', 0),
-                    "episode/max_height": self.max_height_reached[i],
-                    "episode/standing_assist": info.get('standing_assist', 0),
-                    "episode/early_termination_reason": info.get('early_termination_reason', "none"),
-                    "timesteps": self.num_timesteps,
-                }
-                if wandb.run: # Check if wandb is active
-                    wandb.log(log_data)
+                    # Log episode metrics to wandb with "episode/" prefix
+                    log_data = {
+                        "episode/reward": float(self.current_episode_reward[i]),
+                        "episode/length": int(self.current_episode_length[i]),
+                        "episode/stand_reward": float(episode_info.get('stand_reward', 0)),
+                        "episode/wave_reward": float(episode_info.get('wave_reward', 0)),
+                        "episode/max_height": float(self.max_height_reached[i]),
+                        "episode/standing_assist": float(episode_info.get('standing_assist', 0)),
+                        "episode/early_termination_reason": episode_info.get('early_termination_reason', "none"),
+                        "timesteps": self.num_timesteps,
+                    }
+                    if wandb.run:  # Check if wandb is active
+                        wandb.log(log_data)
 
-                # Reset accumulators for the finished environment
-                self.current_episode_reward[i] = 0
-                self.current_episode_length[i] = 0
-                self.max_height_reached[i] = 0
+                    # Reset accumulators for the finished environment
+                    self.current_episode_reward[i] = 0
+                    self.current_episode_length[i] = 0
+                    self.max_height_reached[i] = 0
 
         # Calculate and log progress (based on total steps)
         percent = round(100 * self.num_timesteps / self.total_timesteps, 1)
-        if percent > self.last_percent + 0.9: # Log every ~1%
+        if percent > self.last_percent + 0.9:  # Log every ~1%
             elapsed_time = time.time() - self.start_time
             if self.num_timesteps > 0:
                 time_per_step = elapsed_time / self.num_timesteps
@@ -114,7 +144,7 @@ class ProgressCallback(BaseCallback):
     def _on_rollout_end(self):
         """Called after each policy update / rollout collection."""
         if not wandb.run:
-             return
+            return
 
         # Log all SB3 training metrics automatically captured by the logger
         metrics = self.logger.name_to_value if hasattr(self.logger, 'name_to_value') else {}
@@ -124,13 +154,13 @@ class ProgressCallback(BaseCallback):
             # Standardize keys for wandb
             if key.startswith("rollout/") or key.startswith("train/") or key.startswith("time/"):
                 log_data[key] = value
-            else: # Default to train/ prefix if unsure
+            else:  # Default to train/ prefix if unsure
                 log_data[f"train/{key}"] = value
 
         # Add current learning rate (might be a schedule)
         if hasattr(self.model, 'lr_schedule') and hasattr(self.model, '_current_progress_remaining'):
             log_data["train/learning_rate"] = self.model.lr_schedule(self.model._current_progress_remaining)
-        
+
         # Add current clip range (might be a schedule)
         if hasattr(self.model, 'clip_range') and hasattr(self.model, '_current_progress_remaining'):
             log_data["train/clip_range"] = self.model.clip_range(self.model._current_progress_remaining)
