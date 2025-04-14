@@ -210,69 +210,40 @@ class DMCWrapper(gym.Env):
             return [0.1, 0.1]  # Default if lookup fails
 
     def _compute_stand_reward(self):
-        """Reward function focused on maximizing head height while keeping feet on ground."""
+        """Reward function that gives exponentially negative reward below 0.3,
+        exponentially positive between 0.3 and STAND_HEIGHT, and zero above."""
         physics = self.env.physics
         
-        # Get head height
+        # Get head height 
         try:
             head_height = physics.named.data.geom_xpos['head', 'z']
         except:
             # If head lookup fails, use torso height as approximation
             head_height = self._get_height()
         
-        # Get feet positions
-        try:
-            left_foot_height = physics.named.data.geom_xpos['left_foot', 'z'] 
-            right_foot_height = physics.named.data.geom_xpos['right_foot', 'z']
-            avg_foot_height = (left_foot_height + right_foot_height) / 2.0
-            
-            # More gradual feet height penalty - use a threshold
-            feet_penalty = 0.0
-            if avg_foot_height > 0.1:  # Threshold for "off ground"
-                feet_penalty = 20.0 * (avg_foot_height - 0.1)**2  # Quadratic for more gradual scaling
-        except:
-            # If foot lookup fails, assume neutral 
-            avg_foot_height = 0.1
-            feet_penalty = 0.0
+        # Define standard humanoid stand height from DeepMind
+        STAND_HEIGHT = 1.4
         
-        # Calculate torso uprightness for stability
-        torso_z_axis = physics.named.data.xmat['torso'][6:9]
-        upright_value = max(0.0, torso_z_axis[2])  # Not squared for gentler gradient
-        upright_reward = 10.0 * upright_value
-        
-        # Calculate velocity penalty - more forgiving
-        vel = physics.data.qvel.copy()
-        vel_norm = np.linalg.norm(vel)
-        vel_penalty = 5.0 * vel_norm if vel_norm > 1.0 else 0.0  # Higher threshold
-        
-        # Main reward: maximize head height while keeping feet on ground
-        # Add a target height to avoid extreme height
-        target_head_height = 1.65  # Typical human head height when standing
-        head_height_reward = 30.0 * (1.0 - abs(head_height - target_head_height) / target_head_height)
-        
-        # Reward for head being higher than feet - a key goal
-        head_above_feet_reward = 20.0 * max(0, head_height - avg_foot_height - 1.0)
-        
-        # Bonus for stable standing position
-        standing_bonus = 0.0
-        if head_height > 1.4 and upright_value > 0.9 and avg_foot_height < 0.15:
-            standing_bonus = 10.0
-        
-        # Total reward - more balanced with smaller penalties
-        total_reward = (
-            head_height_reward +      # Reward head at target height
-            head_above_feet_reward +  # Reward head being higher than feet
-            upright_reward +          # Reward being upright
-            standing_bonus -          # Bonus for good standing
-            feet_penalty -            # More gradual penalty for feet off ground
-            vel_penalty               # More forgiving velocity penalty
-        )
-        
-        # Less extreme penalty for falling
+        # Calculate reward based on height
         if head_height < 0.3:
-            return -30.0
-        
-        return total_reward
+            # Exponentially worse penalty as height approaches 0
+            # Base penalty of -30 at height=0.3, gets much worse as height decreases
+            c = 30.0  # Base penalty value
+            d = 5.0   # Controls how quickly penalty increases
+            # This formula gives -30 at height=0.3 and gets exponentially worse as height decreases
+            reward = -c * np.exp(d * (0.3 - head_height))
+            return float(reward)
+        elif head_height <= STAND_HEIGHT:
+            # Exponential reward that grows from ~0 at height=0.3 to maximum at height=STAND_HEIGHT
+            normalized_height = (head_height - 0.3) / (STAND_HEIGHT - 0.3)
+            # Using exponential growth formula: a * (e^(b*x) - 1)
+            a = 100.0  # Maximum reward value
+            b = 2.0    # Controls curve steepness
+            reward = a * (np.exp(b * normalized_height) - 1)
+            return float(reward)
+        else:
+            # Zero reward for heights above STAND_HEIGHT
+            return 0.0
 
     def _flatten_obs(self, obs_dict):
         """Flatten observation dictionary."""
