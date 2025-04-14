@@ -1,487 +1,211 @@
 import gymnasium as gym
 import numpy as np
 from dm_control import suite
-from dm_control.rl import control # Added for base Environment class check
-import collections # Added for OrderedDict check
+import collections
 
 class DMCWrapper(gym.Env):
-    """Wrapper for dm_control environments to make them compatible with Gymnasium.
-    Enhanced with curriculum learning and reward shaping for better standing and waving."""
+    """Simplified wrapper for dm_control humanoid environments focused on standing."""
 
     def __init__(self, domain_name="humanoid", task_name="stand",
-                 enable_waving=False, initial_standing_assist=0.8,
-                 assist_decay_rate=0.9999, max_steps=1000, seed=None): # Added seed, decay_rate
+                 initial_standing_assist=0.8, assist_decay_rate=0.9999, 
+                 max_steps=1000, seed=None):
 
         # Load the environment
-        # Use a fixed random state for the environment for reproducibility within the wrapper instance if seed provided
         random_state = np.random.RandomState(seed) if seed is not None else None
-        self.env = suite.load(domain_name=domain_name, task_name=task_name, task_kwargs={'random': random_state})
+        self.env = suite.load(domain_name=domain_name, task_name=task_name, 
+                             task_kwargs={'random': random_state})
 
-        # Get observation specs and determine total dimensions
+        # Get observation specs
         obs_spec = self.env.observation_spec()
         if not isinstance(obs_spec, collections.OrderedDict):
-             print("Warning: Observation spec is not an OrderedDict. Flattening order might be inconsistent.")
-             obs_spec = collections.OrderedDict(obs_spec)
+            obs_spec = collections.OrderedDict(obs_spec)
         
-        self._obs_keys = list(obs_spec.keys()) # Store keys for consistent flattening
-        # Calculate total_obs_dim and explicitly cast to int
-        total_obs_dim = int(sum(np.prod(spec.shape) for spec in obs_spec.values())) # <--- ADD int() CAST HERE
+        self._obs_keys = list(obs_spec.keys())
+        total_obs_dim = int(sum(np.prod(spec.shape) for spec in obs_spec.values()))
         
-        # Define the observation space (continuous vector of all observations combined)
+        # Define spaces
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(total_obs_dim,), dtype=np.float64
         )
 
-        # Get action specs
         action_spec = self.env.action_spec()
-
-        # Define the action space
         self.action_space = gym.spaces.Box(
             low=action_spec.minimum.astype(np.float32),
             high=action_spec.maximum.astype(np.float32),
             shape=action_spec.shape,
-            dtype=np.float32 # SB3 typically expects float32 actions
+            dtype=np.float32
         )
-
-        # Flag to enable/disable waving behavior
-        self.enable_waving = enable_waving
 
         # Curriculum learning parameters
         self.initial_standing_assist = initial_standing_assist
-        self.standing_assist_decay = assist_decay_rate # Use passed decay rate
+        self.standing_assist_decay = assist_decay_rate
         self.current_standing_assist = initial_standing_assist
 
         # Episode tracking
         self.max_steps = max_steps
         self.steps_this_episode = 0
         self.best_height_this_episode = 0.0
-        self.no_progress_steps = 0
-        self.total_stand_reward = 0.0
-        self.total_wave_reward = 0.0
 
-
-        # Waving-related variables (initialize only if needed)
-        if self.enable_waving:
-            self._init_wave_vars()
-            # Identify right arm joints (adjust if your model differs)
-            # Example indices for standard humanoid: shoulder_pitch, shoulder_roll, elbow_pitch
-            self.right_arm_joint_indices = [
-                self.env.physics.model.name2id('right_shoulder_pitch', 'joint'),
-                self.env.physics.model.name2id('right_shoulder_roll', 'joint'),
-                self.env.physics.model.name2id('right_elbow_pitch', 'joint')
-            ]
-            # Filter out invalid indices (-1)
-            self.right_arm_joint_indices = [idx for idx in self.right_arm_joint_indices if idx != -1]
-            if not self.right_arm_joint_indices:
-                 print("Warning: Could not find right arm joint indices by name. Waving reward will be disabled.")
-                 self.enable_waving = False # Disable if joints not found
-
-
-        # Metadata for rendering (optional)
-        self.metadata = {'render_modes': ['human', 'rgb_array'], 'render_fps': int(1.0 / self.env.physics.timestep())}
-
-
-    def _init_wave_vars(self):
-        """Initialize variables needed for wave reward calculation."""
-        self.prev_arm_positions = None
-        self.prev_arm_velocities = None # Store previous velocities as well
-        self.prev_shoulder_delta = 0.0
-        self.wave_cycle_points = 0 # Track points within a potential wave cycle
-        self.direction_changes = 0
-
+        # Metadata for rendering
+        self.metadata = {'render_modes': ['human', 'rgb_array'], 
+                         'render_fps': int(1.0 / self.env.physics.timestep())}
 
     def reset(self, seed=None, options=None):
-        """Reset the environment and return the initial observation."""
-        # Seed the environment's random state if a seed is provided
-        # Note: This seeds the environment's internal randomness (if any in task),
-        # not the physics engine directly in the same way suite.load does.
+        """Reset the environment with standing assistance."""
         if seed is not None:
-             super().reset(seed=seed)
-             # We might want to re-seed the task's random state more directly if possible,
-             # but often suite.load handles the primary seeding.
-             if hasattr(self.env._task, 'random'):
-                 self.env._task.random.seed(seed)
+            super().reset(seed=seed)
+            if hasattr(self.env._task, 'random'):
+                self.env._task.random.seed(seed)
 
-        # Reset the dm_control environment
         time_step = self.env.reset()
 
-        # --- Apply standing assistance (Curriculum) ---
-        # Decay is applied *after* the episode completes (in step),
-        # so here we just use the current_standing_assist value.
-        if self.current_standing_assist > 0.01: # Apply assist if it's still significant
+        # Apply standing assistance
+        if self.current_standing_assist > 0.01:
             with self.env.physics.reset_context():
                 qpos = self.env.physics.data.qpos.copy()
                 qvel = self.env.physics.data.qvel.copy()
 
-                # 1. Raise initial height (z-position, index 2)
-                target_height = 1.2 + 0.2 * np.random.uniform(-0.5, 0.5) # Base height + small noise
+                # Raise initial height
+                target_height = 1.2 + 0.2 * np.random.uniform(-0.5, 0.5)
                 qpos[2] = target_height * self.current_standing_assist + qpos[2] * (1 - self.current_standing_assist)
 
-                # 2. Set torso orientation closer to upright (indices 3-6 are quaternion w,x,y,z)
-                # Target: [1, 0, 0, 0] with noise scaled by (1 - assist)
+                # Set torso orientation closer to upright
                 noise = (np.random.rand(3) - 0.5) * 0.3 * (1 - self.current_standing_assist)
-                target_quat = np.array([1.0, 0.0, 0.0, 0.0])
-                # Apply noise rotation (simplified approach) - better would be SLERP or axis-angle
-                qpos[4:7] += noise # Add noise to x,y,z components
-                qpos[3:7] /= np.linalg.norm(qpos[3:7]) # Re-normalize quaternion
+                qpos[4:7] += noise
+                qpos[3:7] /= np.linalg.norm(qpos[3:7])
 
-                # 3. Nudge joint angles towards a neutral standing pose (optional, can be complex)
-                # Instead of forcing specific angles, let's just add small noise scaled by assist level
-                joint_indices = slice(7, len(qpos)) # Assuming joints start at index 7
-                qpos[joint_indices] += np.random.normal(0, 0.1 * (1 - self.current_standing_assist), size=qpos[joint_indices].shape)
-
-                # 4. Set initial velocities to near zero for stability
-                qvel[:] *= (1 - self.current_standing_assist) # Dampen existing velocities based on assist
-                qvel[:] += np.random.normal(0, 0.05 * (1-self.current_standing_assist), size=qvel.shape) # Add small noise
-
-                # Apply the modified state
+                # Dampen initial velocities
+                qvel[:] *= (1 - self.current_standing_assist)
+                
+                # Apply modified state
                 self.env.physics.set_state(np.concatenate([qpos, qvel]))
 
-        # Reset episode-specific variables
+        # Reset episode variables
         self.steps_this_episode = 0
-        self.best_height_this_episode = self.env.physics.torso_height() if hasattr(self.env.physics, 'torso_height') else self.env.physics.named.data.geom_xpos['torso', 'z']
-        self.no_progress_steps = 0
-        self.total_stand_reward = 0.0
-        self.total_wave_reward = 0.0
-
-        if self.enable_waving:
-            self._init_wave_vars() # Reset wave variables
+        self.best_height_this_episode = self._get_height()
 
         # Get initial observation and info
         obs = self._flatten_obs(time_step.observation)
-        info = {'standing_assist': self.current_standing_assist} # Initial info
+        info = {'standing_assist': self.current_standing_assist}
 
-        # Ensure obs is float32 for SB3
         return obs.astype(np.float32), info
 
-    
     def step(self, action):
-        """Take a step in the environment with fixed reward shape."""
-        # Ensure action is float64 for dm_control if necessary, but usually float32 is fine
+        """Take a step and calculate standing reward."""
         action = action.astype(np.float64)
-    
-        # Execute action in the dm_control environment
         time_step = self.env.step(action)
-    
-        # Increment step counter
         self.steps_this_episode += 1
-    
-        # Get flattened observation
-        obs_dict = time_step.observation
-        obs_flat = self._flatten_obs(obs_dict).astype(np.float32)  # Return float32
-    
-        # --- Calculate Rewards ---
-        # Use physics state directly for reward calculation where needed
-        physics_state = self.env.physics
-    
-        # 1. Standing Reward
-        stand_reward = self._compute_stand_reward(obs_dict, physics_state)
-        self.total_stand_reward += stand_reward
-    
-        # 2. Waving Reward (if enabled and standing)
-        wave_reward = 0.0
-        current_height = physics_state.torso_height() if hasattr(physics_state, 'torso_height') else physics_state.named.data.geom_xpos['torso', 'z']
-        is_standing_enough = current_height > 1.1  # Threshold to enable waving reward
-    
-        if self.enable_waving and is_standing_enough:
-            wave_reward = self._compute_wave_reward(obs_dict, physics_state)
-            # Apply wave reward progressively based on height and stability? Maybe just weight it.
-            wave_weight = 0.2  # Adjust this weight based on importance relative to standing
-            total_reward = stand_reward + wave_weight * wave_reward
-            self.total_wave_reward += wave_reward  # Track unweighted wave reward
-        else:
-            total_reward = stand_reward
-    
-        # --- Check Termination and Truncation ---
-        # Termination: Environment signals end (e.g., fell down in dm_control stand task)
-        terminated = time_step.last()  # dm_control uses time_step.last() for termination
-    
-        # Truncation: Max steps reached or early termination due to lack of progress
-        truncated = False
-        early_termination_reason = "none"
-    
-        # Early termination logic
-        if current_height > self.best_height_this_episode + 0.01:  # Require some minimum improvement
-            self.best_height_this_episode = current_height
-            self.no_progress_steps = 0
-        else:
-            self.no_progress_steps += 1
-    
-        # Terminate if no height progress for a while AND still low
-        if self.no_progress_steps > 250 and current_height < 0.8:
-            truncated = True  # Treat as truncation (task failed)
-            early_termination_reason = "no_progress_low_height"
-    
-        # Truncate if max steps reached
-        if self.steps_this_episode >= self.max_steps:
-            truncated = True
-            early_termination_reason = "max_steps_reached"
-    
-        # --- Update Curriculum ---
-        # Decay standing assistance IF the episode ended naturally (terminated or truncated)
+        
+        # Get observation
+        obs_flat = self._flatten_obs(time_step.observation).astype(np.float32)
+        
+        # Calculate stand reward
+        reward = self._compute_stand_reward()
+        
+        # Check termination conditions
+        terminated = time_step.last()
+        truncated = self.steps_this_episode >= self.max_steps
+        
+        # Update curriculum on episode end
         if terminated or truncated:
             self.current_standing_assist = max(0.0, self.current_standing_assist * self.standing_assist_decay)
-    
-        # --- Prepare Info Dictionary ---
+        
+        # Track best height
+        current_height = self._get_height()
+        if current_height > self.best_height_this_episode:
+            self.best_height_this_episode = current_height
+            
+        # Prepare info dictionary
         info = {
-            'stand_reward_step': stand_reward,  # Reward for this step
-            'wave_reward_step': wave_reward,
             'height': current_height,
             'steps': self.steps_this_episode,
-            'standing_assist': self.current_standing_assist,  # Current assist level
-            'early_termination_reason': early_termination_reason,
-            'is_standing_enough': is_standing_enough,  # For debugging wave activation
+            'standing_assist': self.current_standing_assist,
         }
-        # Add final info when episode ends (SB3 uses this)
+        
+        # Add final info for episode end
         if terminated or truncated:
-            info['final_info'] = {  # SB3 expects episode summary here
-                'stand_reward': self.total_stand_reward,
-                'wave_reward': self.total_wave_reward,  # Log total unweighted wave reward
-                'height': current_height,  # Final height
+            info['final_info'] = {
+                'height': current_height,
+                'max_height': self.best_height_this_episode,
                 'steps': self.steps_this_episode,
-                'standing_assist': self.current_standing_assist,  # Assist level at end of ep
-                'early_termination_reason': early_termination_reason,
-                'max_height_episode': self.best_height_this_episode,
-                'TimeLimit.truncated': truncated and not terminated,  # Indicate if truncated by time limit specifically
-                'terminal_observation': obs_flat,  # SB3 uses this
+                'standing_assist': self.current_standing_assist,
+                'terminal_observation': obs_flat,
             }
-            # Add legacy keys if needed by ProgressCallback structure
-            info.update(info['final_info'])
-    
-        # CRITICAL: Ensure reward is a scalar to avoid broadcasting issues
-        # This is the key fix to prevent the broadcasting error you're experiencing
-        total_reward = float(total_reward)
-    
-        # Return (obs, reward, terminated, truncated, info)
-        return obs_flat, total_reward, terminated, truncated, info
+        
+        # Ensure reward is a scalar
+        reward = float(reward)
+        
+        return obs_flat, reward, terminated, truncated, info
 
+    def _get_height(self):
+        """Get current torso height."""
+        if hasattr(self.env.physics, 'torso_height'):
+            return self.env.physics.torso_height()
+        return self.env.physics.named.data.geom_xpos['torso', 'z']
+
+    def _compute_stand_reward(self):
+        """Simplified reward focusing on standing height and orientation."""
+        physics = self.env.physics
+        current_height = self._get_height()
+        
+        # Height reward - the main component
+        target_height = 1.4
+        height_threshold = 0.6
+        
+        if current_height < height_threshold:
+            height_reward = current_height * 0.5
+        else:
+            height_diff = current_height - height_threshold
+            height_reward = 5.0 * (1.0 - np.exp(-3.0 * height_diff))
+            
+            # Bonus for getting close to target height
+            if current_height > target_height * 0.9:
+                height_reward += 3.0
+        
+        # Upright orientation reward
+        upright_reward = 0.0
+        if hasattr(physics, 'torso_upright'):
+            upright_value = physics.torso_upright()
+        else:
+            # Get torso orientation from physics
+            torso_z_axis = physics.named.data.xmat['torso'][6:9]
+            upright_value = max(0.0, torso_z_axis[2])
+        
+        upright_reward = 2.0 * upright_value
+        
+        # Combine rewards
+        total_reward = height_reward + upright_reward
+        
+        # Scale reward based on difficulty
+        curriculum_scale = 1.0 + (1.0 - self.current_standing_assist)
+        total_reward *= curriculum_scale
+        
+        return total_reward
 
     def _flatten_obs(self, obs_dict):
-        """Flatten the observation dictionary into a 1D numpy array using stored keys."""
+        """Flatten the observation dictionary into a 1D array."""
         obs_list = []
         for key in self._obs_keys:
             val = obs_dict[key]
             if isinstance(val, (int, float, np.number)):
-                 obs_list.append(np.array([val], dtype=np.float64))
+                obs_list.append(np.array([val], dtype=np.float64))
             else:
-                 obs_list.append(np.asarray(val, dtype=np.float64).flatten())
+                obs_list.append(np.asarray(val, dtype=np.float64).flatten())
         return np.concatenate(obs_list)
-
-
-    def _compute_stand_reward(self, observation, physics_state):
-        """Enhanced reward shaping for standing, with stronger emphasis on height."""
-    
-        # Get current height - critical for standing reward
-        current_height = physics_state.torso_height() if hasattr(physics_state, 'torso_height') else physics_state.named.data.geom_xpos['torso', 'z']
-        
-        # --- PRIMARY HEIGHT-BASED REWARD ---
-        # Dramatically increase the importance of height
-        # This is a sigmoid-shaped reward that gives increasingly strong rewards as height increases
-        # The humanoid torso is typically around 1.4m when standing
-        target_height = 1.4
-        height_threshold = 0.6  # Minimum height to start getting significant reward
-        
-        # Exponential reward for height - increases dramatically as humanoid gets taller
-        # This creates a "reward cliff" that encourages exploration to reach higher states
-        height_factor = 10.0  # Increase this to make height more important
-        if current_height < height_threshold:
-            # Small reward when below threshold, just to encourage any upward movement
-            height_reward = current_height * 0.5
-        else:
-            # Exponential reward when above threshold
-            height_diff = current_height - height_threshold
-            height_reward = height_factor * (1.0 - np.exp(-3.0 * height_diff))
-            
-            # Bonus for getting very close to standing height
-            if current_height > target_height * 0.9:
-                height_reward += 5.0
-        
-        # --- UPRIGHT ORIENTATION REWARD ---
-        # More aggressive reward for being upright
-        upright_reward = 0.0
-        if hasattr(physics_state, 'torso_upright'):
-            upright_value = physics_state.torso_upright()  # Ranges ~0 (down) to 1 (up)
-            upright_reward = 2.0 * upright_value  # Double the weight
-        else:
-            # Get torso orientation from physics
-            torso_z_axis = physics_state.named.data.xmat['torso'][6:9]  # z-axis vector (3rd column)
-            upright_value = max(0.0, torso_z_axis[2])  # z-component (should be close to 1 when upright)
-            upright_reward = 2.0 * upright_value  # Double the weight
-            
-            # Additional reward for very upright orientation
-            if upright_value > 0.8:
-                upright_reward += 3.0
-        
-        # --- JOINT POSITIONS REWARD ---
-        # Encourage the humanoid to keep its legs straight when standing
-        leg_reward = 0.0
-        try:
-            # Try to access leg joint positions directly if available
-            l_knee = abs(physics_state.named.data.qpos['left_knee'])
-            r_knee = abs(physics_state.named.data.qpos['right_knee'])
-            
-            # Reward straight legs (smaller joint angles)
-            leg_straightness = 2.0 * np.exp(-2.0 * (l_knee + r_knee))
-            leg_reward = leg_straightness
-        except:
-            # Skip leg reward if joint names not available
-            pass
-        
-        # --- STABILITY REWARDS & PENALTIES ---
-        # Strongly penalize falling over (negative reward)
-        falling_penalty = 0.0
-        if current_height < 0.5:
-            falling_penalty = -5.0
-        
-        # Penalize excessive movement when already at good height
-        stability_penalty = 0.0
-        if current_height > 1.0:
-            # Linear velocity of torso
-            lin_vel_norm = np.linalg.norm(physics_state.named.data.sensordata['torso_vel'][0:3])
-            # Angular velocity of torso
-            ang_vel_norm = np.linalg.norm(physics_state.named.data.sensordata['torso_vel'][3:6])
-            
-            # Only penalize high velocities
-            if lin_vel_norm > 1.0 or ang_vel_norm > 1.0:
-                stability_penalty = -0.5 * (lin_vel_norm + ang_vel_norm)
-        
-        # Original DM Control reward as a component
-        base_reward = 0.0
-        if hasattr(self.env, '_task') and hasattr(self.env._task, 'get_reward'):
-            base_reward = float(self.env._task.get_reward(physics_state))
-        
-        # --- COMBINE REWARDS ---
-        # Adjust weights to prioritize height and uprightness
-        total_reward = (
-            height_reward * 2.0 +       # Primary focus: get taller
-            upright_reward * 1.5 +      # Secondary focus: stay upright
-            leg_reward * 0.8 +          # Tertiary: maintain good posture
-            base_reward * 0.5 +         # Include original reward
-            falling_penalty +           # Avoid falling
-            stability_penalty           # Stay stable when upright
-        )
-        
-        # Curriculum scaling - make reward scale with difficulty
-        # As assistance decreases, rewards should increase
-        curriculum_scale = 1.0 + 2.0 * (1.0 - self.current_standing_assist)
-        total_reward *= curriculum_scale
-        
-        # Add debugging info to the info dict (if available)
-        if hasattr(self, 'debug_info'):
-            self.debug_info.update({
-                'height': current_height,
-                'height_reward': height_reward,
-                'upright_reward': upright_reward,
-                'base_reward': base_reward,
-                'total_reward': total_reward
-            })
-        
-        return total_reward
-
-    def _compute_wave_reward(self, observation, physics_state):
-        """Compute reward for wave-like motion of the right arm."""
-        if not self.enable_waving or not self.right_arm_joint_indices:
-            return 0.0
-
-        # Get current arm joint angles and velocities
-        qpos = physics_state.data.qpos
-        qvel = physics_state.data.qvel
-        joint_indices = slice(7, len(qpos)) # Assuming joints start at index 7
-        joint_vel_indices = slice(6, len(qvel)) # Assuming joint vels start at index 6
-
-        # Map global joint indices to local indices within the joint vectors
-        # This requires knowing the full joint list order. A simpler way is to use named access if available.
-        try:
-             # Use named access if possible (more robust)
-             r_shoulder_pitch_vel = physics_state.named.data.qvel['right_shoulder_pitch']
-             r_shoulder_pitch_pos = physics_state.named.data.qpos['right_shoulder_pitch']
-             r_shoulder_roll_pos = physics_state.named.data.qpos['right_shoulder_roll']
-             # Add elbow etc. if needed
-        except KeyError:
-             # Fallback to indices (less robust) - requires knowing exact index mapping
-             print("Warning: Using hardcoded indices for wave reward. May fail if joint order changes.")
-             # Find the indices within the joint slice
-             base_joint_qpos_idx = 7
-             base_joint_qvel_idx = 6
-             local_arm_indices_pos = [idx - base_joint_qpos_idx for idx in self.right_arm_joint_indices]
-             local_arm_indices_vel = [idx - base_joint_qvel_idx for idx in self.right_arm_joint_indices]
-
-             if any(i < 0 for i in local_arm_indices_pos + local_arm_indices_vel):
-                  print("Error: Invalid joint index mapping for waving.")
-                  return 0.0 # Cannot calculate reward
-
-             arm_positions = qpos[joint_indices][local_arm_indices_pos]
-             arm_velocities = qvel[joint_vel_indices][local_arm_indices_vel]
-             r_shoulder_pitch_vel = arm_velocities[0] # Assuming pitch is first in self.right_arm_joint_indices
-             r_shoulder_pitch_pos = arm_positions[0]
-             r_shoulder_roll_pos = arm_positions[1] # Assuming roll is second
-
-
-        wave_reward = 0.0
-
-        # --- Wave criteria ---
-        # 1. Arm Elevation (Shoulder Pitch): Reward raising the arm (negative angle is up/forward)
-        target_pitch = -1.0 # Target angle for raised arm (radians)
-        pitch_reward = 0.5 * np.exp(-3.0 * (r_shoulder_pitch_pos - target_pitch)**2) # Gaussian around target
-        wave_reward += pitch_reward
-
-        # 2. Arm Out to Side (Shoulder Roll): Reward rolling arm outwards (negative angle)
-        target_roll = -0.5
-        roll_reward = 0.3 * np.exp(-4.0 * (r_shoulder_roll_pos - target_roll)**2)
-        wave_reward += roll_reward
-
-
-        # 3. Waving Motion (Velocity Changes): Reward changes in shoulder pitch velocity when arm is raised
-        if r_shoulder_pitch_pos < -0.5: # Only reward waving if arm is somewhat raised
-             current_delta_vel = r_shoulder_pitch_vel # Use velocity directly
-
-             # Check for direction change (crossing zero velocity with sufficient magnitude)
-             if self.prev_arm_velocities is not None:
-                 prev_shoulder_pitch_vel = self.prev_arm_velocities[0]
-                 vel_threshold = 0.1 # Min velocity magnitude to count as movement
-                 if np.sign(current_delta_vel) != np.sign(prev_shoulder_pitch_vel) and \
-                    abs(current_delta_vel) > vel_threshold and abs(prev_shoulder_pitch_vel) > vel_threshold:
-                     self.direction_changes += 1
-                     wave_reward += 0.5 # Reward for direction change
-
-             # Reward moderate velocity
-             velocity_magnitude = abs(r_shoulder_pitch_vel)
-             ideal_velocity = 0.8
-             velocity_reward = 0.2 * np.exp(-5.0 * (velocity_magnitude - ideal_velocity)**2)
-             wave_reward += velocity_reward
-
-
-        # Store current state for next step
-        # Need to handle potential key errors if using named access fallback
-        try:
-            self.prev_arm_positions = np.array([r_shoulder_pitch_pos, r_shoulder_roll_pos]) # Store relevant positions
-            self.prev_arm_velocities = np.array([r_shoulder_pitch_vel]) # Store relevant velocities
-        except NameError: # Handles case where variables weren't assigned due to key error
-            pass
-
-        # Bonus for sustained waving (multiple direction changes)
-        wave_reward += 0.1 * min(self.direction_changes, 5)
-
-        return wave_reward
-
 
     def render(self, mode='human', height=480, width=640, camera_id=None):
         """Render the environment."""
         if camera_id is None:
-             # Default camera ID, often 0 (fixed) or 2 (tracking 'egocentric') for humanoids
-             camera_id = 0 if mode == 'human' else 2 # Use tracking camera for rgb_array
-
+            camera_id = 0 if mode == 'human' else 2
+            
         if mode == 'rgb_array':
             return self.env.physics.render(height=height, width=width, camera_id=camera_id)
         elif mode == 'human':
-             # dm_control viewer runs externally, render call might just update it
-             return self.env.physics.render(height=height, width=width, camera_id=camera_id)
+            return self.env.physics.render(height=height, width=width, camera_id=camera_id)
         else:
             raise ValueError(f"Unsupported render mode: {mode}")
 
     def close(self):
         """Close the environment."""
-        # dm_control environments don't typically have an explicit close method in the suite wrapper
-        # but the underlying physics engine might. Usually handled by garbage collection.
         if hasattr(self.env, 'close'):
-             self.env.close()
+            self.env.close()
