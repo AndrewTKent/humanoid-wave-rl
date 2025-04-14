@@ -13,49 +13,80 @@ def evaluate_model(env, model, num_episodes=3):
     Evaluate a trained model on the environment.
     
     Args:
-        env: Environment to evaluate on
-        model: Trained model
+        env: The environment to evaluate on
+        model: The trained model
         num_episodes: Number of episodes to evaluate
+        
+    Returns:
+        dict: Dictionary with evaluation metrics
     """
-    all_rewards = []
-    all_stand_rewards = []
-    all_wave_rewards = []
+    # Initialize metrics
+    total_rewards = []
+    stand_rewards = []
+    wave_rewards = []
+    episode_lengths = []
     
-    for episode in range(num_episodes):
+    for episode in range(1, num_episodes + 1):
+        # Reset environment
         obs, _ = env.reset()
         done = False
-        episode_rewards = []
-        episode_stand_rewards = []
-        episode_wave_rewards = []
+        truncated = False
+        total_reward = 0
+        stand_reward = 0
+        wave_reward = 0
+        steps = 0
         
-        while not done:
+        # Run one episode
+        while not (done or truncated):
+            # Get action from model
             action, _ = model.predict(obs, deterministic=True)
-            obs, reward, done, _, info = env.step(action)
             
-            episode_rewards.append(reward)
-            episode_stand_rewards.append(info.get('stand_reward', 0))
-            episode_wave_rewards.append(info.get('wave_reward', 0))
+            # Take action in environment
+            obs, reward, done, truncated, info = env.step(action)
+            
+            # Accumulate rewards
+            total_reward += reward
+            stand_reward += info.get('stand_reward_step', 0)
+            wave_reward += info.get('wave_reward_step', 0)
+            steps += 1
         
-        # Compute episode statistics
-        total_reward = sum(episode_rewards)
-        total_stand_reward = sum(episode_stand_rewards)
-        total_wave_reward = sum(episode_wave_rewards)
+        # Store episode results
+        total_rewards.append(total_reward)
+        stand_rewards.append(stand_reward)
+        wave_rewards.append(wave_reward)
+        episode_lengths.append(steps)
         
-        all_rewards.append(total_reward)
-        all_stand_rewards.append(total_stand_reward)
-        all_wave_rewards.append(total_wave_reward)
-        
-        print(f"Episode {episode+1}:")
+        # Print episode results
+        print(f"Episode {episode}:")
         print(f"  Total Reward: {total_reward:.2f}")
-        print(f"  Stand Reward: {total_stand_reward:.2f}")
-        print(f"  Wave Reward: {total_wave_reward:.2f}")
+        print(f"  Stand Reward: {stand_reward:.2f}")
+        print(f"  Wave Reward: {wave_reward:.2f}")
     
-    # Print overall statistics
-    print("\nEvaluation Summary:")
-    print(f"  Mean Total Reward: {np.mean(all_rewards):.2f}")
-    print(f"  Mean Stand Reward: {np.mean(all_stand_rewards):.2f}")
-    print(f"  Mean Wave Reward: {np.mean(all_wave_rewards):.2f}")
-
+    # Calculate summary metrics
+    mean_total_reward = sum(total_rewards) / len(total_rewards)
+    mean_stand_reward = sum(stand_rewards) / len(stand_rewards)
+    mean_wave_reward = sum(wave_rewards) / len(wave_rewards)
+    mean_episode_length = sum(episode_lengths) / len(episode_lengths)
+    
+    # Print summary
+    print(f"Evaluation Summary:")
+    print(f"  Mean Total Reward: {mean_total_reward:.2f}")
+    print(f"  Mean Stand Reward: {mean_stand_reward:.2f}")
+    print(f"  Mean Wave Reward: {mean_wave_reward:.2f}")
+    
+    # Return results dictionary
+    results = {
+        "mean_total_reward": mean_total_reward,
+        "mean_stand_reward": mean_stand_reward,
+        "mean_wave_reward": mean_wave_reward,
+        "mean_episode_length": mean_episode_length,
+        "total_rewards": total_rewards,
+        "stand_rewards": stand_rewards,
+        "wave_rewards": wave_rewards,
+        "episode_lengths": episode_lengths
+    }
+    
+    return results
 
 
 def record_video(env, model, video_path="humanoid_wave.mp4", num_frames=500):
