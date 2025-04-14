@@ -154,103 +154,104 @@ class DMCWrapper(gym.Env):
         # Ensure obs is float32 for SB3
         return obs.astype(np.float32), info
 
-
+    
     def step(self, action):
-        """Take a step in the environment."""
+        """Take a step in the environment with fixed reward shape."""
         # Ensure action is float64 for dm_control if necessary, but usually float32 is fine
         action = action.astype(np.float64)
-
+    
         # Execute action in the dm_control environment
         time_step = self.env.step(action)
-
+    
         # Increment step counter
         self.steps_this_episode += 1
-
+    
         # Get flattened observation
         obs_dict = time_step.observation
-        obs_flat = self._flatten_obs(obs_dict).astype(np.float32) # Return float32
-
+        obs_flat = self._flatten_obs(obs_dict).astype(np.float32)  # Return float32
+    
         # --- Calculate Rewards ---
         # Use physics state directly for reward calculation where needed
         physics_state = self.env.physics
-
+    
         # 1. Standing Reward
         stand_reward = self._compute_stand_reward(obs_dict, physics_state)
         self.total_stand_reward += stand_reward
-
+    
         # 2. Waving Reward (if enabled and standing)
         wave_reward = 0.0
         current_height = physics_state.torso_height() if hasattr(physics_state, 'torso_height') else physics_state.named.data.geom_xpos['torso', 'z']
-        is_standing_enough = current_height > 1.1 # Threshold to enable waving reward
-
+        is_standing_enough = current_height > 1.1  # Threshold to enable waving reward
+    
         if self.enable_waving and is_standing_enough:
             wave_reward = self._compute_wave_reward(obs_dict, physics_state)
-             # Apply wave reward progressively based on height and stability? Maybe just weight it.
-            wave_weight = 0.2 # Adjust this weight based on importance relative to standing
+            # Apply wave reward progressively based on height and stability? Maybe just weight it.
+            wave_weight = 0.2  # Adjust this weight based on importance relative to standing
             total_reward = stand_reward + wave_weight * wave_reward
-            self.total_wave_reward += wave_reward # Track unweighted wave reward
+            self.total_wave_reward += wave_reward  # Track unweighted wave reward
         else:
             total_reward = stand_reward
-
+    
         # --- Check Termination and Truncation ---
         # Termination: Environment signals end (e.g., fell down in dm_control stand task)
-        terminated = time_step.last() # dm_control uses time_step.last() for termination
-
+        terminated = time_step.last()  # dm_control uses time_step.last() for termination
+    
         # Truncation: Max steps reached or early termination due to lack of progress
         truncated = False
         early_termination_reason = "none"
-
+    
         # Early termination logic
-        if current_height > self.best_height_this_episode + 0.01: # Require some minimum improvement
+        if current_height > self.best_height_this_episode + 0.01:  # Require some minimum improvement
             self.best_height_this_episode = current_height
             self.no_progress_steps = 0
         else:
             self.no_progress_steps += 1
-
+    
         # Terminate if no height progress for a while AND still low
         if self.no_progress_steps > 250 and current_height < 0.8:
-             truncated = True # Treat as truncation (task failed)
-             early_termination_reason = "no_progress_low_height"
-
+            truncated = True  # Treat as truncation (task failed)
+            early_termination_reason = "no_progress_low_height"
+    
         # Truncate if max steps reached
         if self.steps_this_episode >= self.max_steps:
             truncated = True
             early_termination_reason = "max_steps_reached"
-
-
+    
         # --- Update Curriculum ---
         # Decay standing assistance IF the episode ended naturally (terminated or truncated)
         if terminated or truncated:
             self.current_standing_assist = max(0.0, self.current_standing_assist * self.standing_assist_decay)
-
-
+    
         # --- Prepare Info Dictionary ---
         info = {
-            'stand_reward_step': stand_reward, # Reward for this step
+            'stand_reward_step': stand_reward,  # Reward for this step
             'wave_reward_step': wave_reward,
             'height': current_height,
             'steps': self.steps_this_episode,
-            'standing_assist': self.current_standing_assist, # Current assist level
+            'standing_assist': self.current_standing_assist,  # Current assist level
             'early_termination_reason': early_termination_reason,
-            'is_standing_enough': is_standing_enough, # For debugging wave activation
+            'is_standing_enough': is_standing_enough,  # For debugging wave activation
         }
         # Add final info when episode ends (SB3 uses this)
         if terminated or truncated:
-            info['final_info'] = { # SB3 expects episode summary here
+            info['final_info'] = {  # SB3 expects episode summary here
                 'stand_reward': self.total_stand_reward,
-                'wave_reward': self.total_wave_reward, # Log total unweighted wave reward
-                 'height': current_height, # Final height
-                 'steps': self.steps_this_episode,
-                 'standing_assist': self.current_standing_assist, # Assist level at end of ep
-                 'early_termination_reason': early_termination_reason,
-                 'max_height_episode': self.best_height_this_episode,
-                 'TimeLimit.truncated': truncated and not terminated, # Indicate if truncated by time limit specifically
-                 'terminal_observation': obs_flat, # SB3 uses this
+                'wave_reward': self.total_wave_reward,  # Log total unweighted wave reward
+                'height': current_height,  # Final height
+                'steps': self.steps_this_episode,
+                'standing_assist': self.current_standing_assist,  # Assist level at end of ep
+                'early_termination_reason': early_termination_reason,
+                'max_height_episode': self.best_height_this_episode,
+                'TimeLimit.truncated': truncated and not terminated,  # Indicate if truncated by time limit specifically
+                'terminal_observation': obs_flat,  # SB3 uses this
             }
             # Add legacy keys if needed by ProgressCallback structure
             info.update(info['final_info'])
-
-
+    
+        # CRITICAL: Ensure reward is a scalar to avoid broadcasting issues
+        # This is the key fix to prevent the broadcasting error you're experiencing
+        total_reward = float(total_reward)
+    
         # Return (obs, reward, terminated, truncated, info)
         return obs_flat, total_reward, terminated, truncated, info
 
