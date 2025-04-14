@@ -268,83 +268,114 @@ class DMCWrapper(gym.Env):
 
 
     def _compute_stand_reward(self, observation, physics_state):
-        """Enhanced reward shaping for standing, using physics state."""
-
-        # 1. Base reward from DM Control task (often checks height, uprightness)
-        # Accessing the private _task is generally discouraged, but sometimes necessary for the raw reward.
-        # Alternative: Replicate the core reward logic here if known.
-        if hasattr(self.env, '_task') and hasattr(self.env._task, 'get_reward'):
-             base_reward = float(self.env._task.get_reward(physics_state))
-        else:
-             # Fallback/alternative: Reward based on height
-             current_height = physics_state.torso_height() if hasattr(physics_state, 'torso_height') else physics_state.named.data.geom_xpos['torso', 'z']
-             base_reward = max(0.0, min(current_height / 1.4, 1.0)) # Simple height reward scaled 0-1
-
-
-        # 2. Height Reward Component
+        """Enhanced reward shaping for standing, with stronger emphasis on height."""
+    
+        # Get current height - critical for standing reward
         current_height = physics_state.torso_height() if hasattr(physics_state, 'torso_height') else physics_state.named.data.geom_xpos['torso', 'z']
-        # Encourage reaching target height (e.g., ~1.4m), penalize being too low
-        height_reward = 1.0 * np.exp(-5.0 * (current_height - 1.4)**2) # Gaussian centered at 1.4m
-        # Add a small constant reward just for being above ground
-        height_reward += 0.1 if current_height > 0.5 else -0.5
-
-
-        # 3. Upright Orientation Reward
-        # Use torso orientation (quaternion or z-axis of rotation matrix)
-        # physics.torso_upright() is simple if available, physics.torso_orientation() gives quat
-        if hasattr(physics_state, 'torso_upright'):
-             upright_value = physics_state.torso_upright() # Ranges ~0 (down) to 1 (up)
-             upright_reward = 0.5 * upright_value
+        
+        # --- PRIMARY HEIGHT-BASED REWARD ---
+        # Dramatically increase the importance of height
+        # This is a sigmoid-shaped reward that gives increasingly strong rewards as height increases
+        # The humanoid torso is typically around 1.4m when standing
+        target_height = 1.4
+        height_threshold = 0.6  # Minimum height to start getting significant reward
+        
+        # Exponential reward for height - increases dramatically as humanoid gets taller
+        # This creates a "reward cliff" that encourages exploration to reach higher states
+        height_factor = 10.0  # Increase this to make height more important
+        if current_height < height_threshold:
+            # Small reward when below threshold, just to encourage any upward movement
+            height_reward = current_height * 0.5
         else:
-             # Use quaternion (w, x, y, z) - index 3-6 in qpos
-             # A simple check is the 'w' component (qpos[3]) or z-component of transformed z-axis
-             quat = physics_state.data.qpos[3:7]
-             # Project world z-axis [0,0,1] by inverse quaternion rotation to get body's z-axis in world frame
-             # Simpler: Check 'w' component's deviation from 1 (upright) or -1 (upside down)
-             # Even simpler: Check z-component of head/torso geom position relative to feet/pelvis
-             # Using torso geom z-axis from rotation matrix is more robust:
-             torso_z_axis = physics_state.named.data.xmat['torso'][6:9] # z-axis vector (3rd column)
-             upright_value = max(0.0, torso_z_axis[2]) # z-component of the body's z-axis (should be close to 1 when upright)
-             upright_reward = 0.5 * upright_value
-
-
-        # 4. Stability Reward (Penalize Velocity)
-        # Linear velocity of torso
-        lin_vel_norm = np.linalg.norm(physics_state.named.data.sensordata['torso_vel'][0:3])
-        # Angular velocity of torso
-        ang_vel_norm = np.linalg.norm(physics_state.named.data.sensordata['torso_vel'][3:6])
-        # Joint velocities (indices 6+ in qvel)
-        joint_vel = physics_state.data.qvel[6:] # Assuming first 6 are free joint
-        joint_vel_norm = np.linalg.norm(joint_vel)
-
-        # Penalize excessive linear/angular velocity and joint velocity
-        velocity_penalty = 0.1 * lin_vel_norm + 0.05 * ang_vel_norm + 0.02 * joint_vel_norm
-        stability_reward = -min(velocity_penalty, 1.0) # Cap penalty
-
-
-        # 5. Control Effort Penalty (Optional but good)
-        control_effort = np.sum(np.square(physics_state.data.ctrl))
-        control_penalty = -0.001 * min(control_effort, 10.0) # Small penalty for excessive control signals
-
-
-        # --- Combine Rewards ---
-        # Adjust weights based on importance
-        # Let's try: base (if good), height, upright, stability
-        total_shaped_reward = (
-            base_reward * 0.5 +       # Weight the original reward
-            height_reward * 1.0 +     # Strong incentive for height
-            upright_reward * 0.8 +    # Strong incentive for uprightness
-            stability_reward * 1.0 +  # Penalize instability
-            control_penalty * 1.0     # Penalize high controls
+            # Exponential reward when above threshold
+            height_diff = current_height - height_threshold
+            height_reward = height_factor * (1.0 - np.exp(-3.0 * height_diff))
+            
+            # Bonus for getting very close to standing height
+            if current_height > target_height * 0.9:
+                height_reward += 5.0
+        
+        # --- UPRIGHT ORIENTATION REWARD ---
+        # More aggressive reward for being upright
+        upright_reward = 0.0
+        if hasattr(physics_state, 'torso_upright'):
+            upright_value = physics_state.torso_upright()  # Ranges ~0 (down) to 1 (up)
+            upright_reward = 2.0 * upright_value  # Double the weight
+        else:
+            # Get torso orientation from physics
+            torso_z_axis = physics_state.named.data.xmat['torso'][6:9]  # z-axis vector (3rd column)
+            upright_value = max(0.0, torso_z_axis[2])  # z-component (should be close to 1 when upright)
+            upright_reward = 2.0 * upright_value  # Double the weight
+            
+            # Additional reward for very upright orientation
+            if upright_value > 0.8:
+                upright_reward += 3.0
+        
+        # --- JOINT POSITIONS REWARD ---
+        # Encourage the humanoid to keep its legs straight when standing
+        leg_reward = 0.0
+        try:
+            # Try to access leg joint positions directly if available
+            l_knee = abs(physics_state.named.data.qpos['left_knee'])
+            r_knee = abs(physics_state.named.data.qpos['right_knee'])
+            
+            # Reward straight legs (smaller joint angles)
+            leg_straightness = 2.0 * np.exp(-2.0 * (l_knee + r_knee))
+            leg_reward = leg_straightness
+        except:
+            # Skip leg reward if joint names not available
+            pass
+        
+        # --- STABILITY REWARDS & PENALTIES ---
+        # Strongly penalize falling over (negative reward)
+        falling_penalty = 0.0
+        if current_height < 0.5:
+            falling_penalty = -5.0
+        
+        # Penalize excessive movement when already at good height
+        stability_penalty = 0.0
+        if current_height > 1.0:
+            # Linear velocity of torso
+            lin_vel_norm = np.linalg.norm(physics_state.named.data.sensordata['torso_vel'][0:3])
+            # Angular velocity of torso
+            ang_vel_norm = np.linalg.norm(physics_state.named.data.sensordata['torso_vel'][3:6])
+            
+            # Only penalize high velocities
+            if lin_vel_norm > 1.0 or ang_vel_norm > 1.0:
+                stability_penalty = -0.5 * (lin_vel_norm + ang_vel_norm)
+        
+        # Original DM Control reward as a component
+        base_reward = 0.0
+        if hasattr(self.env, '_task') and hasattr(self.env._task, 'get_reward'):
+            base_reward = float(self.env._task.get_reward(physics_state))
+        
+        # --- COMBINE REWARDS ---
+        # Adjust weights to prioritize height and uprightness
+        total_reward = (
+            height_reward * 2.0 +       # Primary focus: get taller
+            upright_reward * 1.5 +      # Secondary focus: stay upright
+            leg_reward * 0.8 +          # Tertiary: maintain good posture
+            base_reward * 0.5 +         # Include original reward
+            falling_penalty +           # Avoid falling
+            stability_penalty           # Stay stable when upright
         )
-
-        # Scale reward based on curriculum progress (more reward as task gets harder)
-        # curriculum_scale = 1.0 + 1.0 * max(0.0, (self.initial_standing_assist - self.current_standing_assist))
-        # Simpler: just return the shaped reward. Let the agent figure it out.
-        # Scaling can sometimes obscure the learning signal.
-
-        return total_shaped_reward
-
+        
+        # Curriculum scaling - make reward scale with difficulty
+        # As assistance decreases, rewards should increase
+        curriculum_scale = 1.0 + 2.0 * (1.0 - self.current_standing_assist)
+        total_reward *= curriculum_scale
+        
+        # Add debugging info to the info dict (if available)
+        if hasattr(self, 'debug_info'):
+            self.debug_info.update({
+                'height': current_height,
+                'height_reward': height_reward,
+                'upright_reward': upright_reward,
+                'base_reward': base_reward,
+                'total_reward': total_reward
+            })
+        
+        return total_reward
 
     def _compute_wave_reward(self, observation, physics_state):
         """Compute reward for wave-like motion of the right arm."""
