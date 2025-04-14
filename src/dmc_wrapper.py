@@ -148,11 +148,6 @@ class DMCWrapper(gym.Env):
 
         # Check for jumping (feet too high off ground)
         jump_detected = False
-        if max(foot_heights) > 0.4:  # Higher threshold
-            jump_detected = True
-            # Don't terminate immediately, just note it happened
-            info['jump_detected'] = True
-            reward -= 20.0  # Add penalty but don't terminate
         
         # Regular truncation for max steps
         truncated = self.steps_this_episode >= self.max_steps
