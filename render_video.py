@@ -1,4 +1,7 @@
 import os
+# Force MuJoCo to use EGL for rendering instead of GLFW
+os.environ['MUJOCO_GL'] = 'egl'
+
 import argparse
 import numpy as np
 import imageio
@@ -41,16 +44,20 @@ def record_video_headless(model_path, output_path, num_frames=500, max_steps=100
         if i % 100 == 0:
             print(f"  Rendering frame {i+1}/{num_frames}")
         
-        # Get action from model with some exploration noise for better performance
+        # Get action from model
         action, _ = model.predict(obs, deterministic=False)
         
         # Step the environment
         obs, reward, done, truncated, info = env.step(action)
         total_reward += reward
         
-        # Get frame
-        frame = env.render(mode='rgb_array', height=480, width=640, camera_id=0)
-        frames.append(frame)
+        try:
+            # Get frame with explicit error handling
+            frame = env.render(mode='rgb_array', height=480, width=640, camera_id=0)
+            frames.append(frame)
+        except Exception as e:
+            print(f"Error rendering frame {i+1}: {e}")
+            break
         
         # Print debug info
         if i % 100 == 0:
@@ -63,10 +70,13 @@ def record_video_headless(model_path, output_path, num_frames=500, max_steps=100
             obs, _ = env.reset(seed=42+i)
             total_reward = 0
     
-    # Save the video
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    imageio.mimsave(output_path, frames, fps=30)
-    print(f"Video saved to {output_path}")
+    if frames:
+        # Save the video
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        imageio.mimsave(output_path, frames, fps=30)
+        print(f"Video saved to {output_path}")
+    else:
+        print("No frames were rendered, cannot save video")
 
 def main():
     args = parse_args()
