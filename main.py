@@ -318,33 +318,31 @@ def train_humanoid_stand(args):
     # Create or load the model
     if resume_from and os.path.exists(resume_from):
         print(f"Resuming training from {resume_from}")
-        # Load model but don't set the env yet to avoid issues
+        
+        # Create a temporary copy of the model parameters
+        params_dict = {
+            "learning_rate": lr_schedule,
+            "n_steps": args.n_steps,
+            "batch_size": args.batch_size,
+            "n_epochs": args.n_epochs,
+            "gamma": args.gamma,
+            "ent_coef": args.ent_coef,
+            "clip_range": clip_schedule,
+            "device": device,
+            "policy_kwargs": {
+                "net_arch": net_arch,
+                "activation_fn": torch.nn.ReLU
+            }
+        }
+        
+        # Load model while forcing the new environment (fixes different num_envs)
         model = PPO.load(
             resume_from,
-            env=None,  # Don't set env yet
-            device=device
+            env=env,  # Force the new environment
+            device=device,
+            # Include other hyperparameters to override
+            **params_dict
         )
-        
-        # Set environment after loading
-        model.set_env(env)
-        
-        # IMPORTANT FIX: Override the clip_range with the correct type
-        # Handle PPO's clip_range correctly whether it's a float or a schedule
-        if args.use_linear_schedule:
-            # Use a class attribute to store the original value and replace with schedule
-            model._original_clip_range = model.clip_range
-            model.clip_range = clip_schedule
-        else:
-            # Make sure it's a float value
-            if callable(model.clip_range):
-                model._original_clip_range = model.clip_range
-                model.clip_range = 0.2
-        
-        # Similarly for learning rate
-        if args.use_linear_schedule:
-            model.learning_rate = lr_schedule
-        else:
-            model.learning_rate = args.learning_rate
     else:
         print(f"Creating new model")
         model = PPO(
@@ -441,7 +439,6 @@ def train_humanoid_stand(args):
     print(f"Training and evaluation complete.")
     
     return model, final_model_path
-
 
 def evaluate_trained_model(args):
     """Evaluate a pre-trained model."""
