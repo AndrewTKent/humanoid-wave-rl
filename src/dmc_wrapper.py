@@ -668,4 +668,9 @@ class DMCWrapper(gym.Env):
         elif mode == 'human':
             return self.env.physics.render(height=height, width=width, camera_id=camera_id)
         else:
-            raise ValueError(
+            raise ValueError(f"Unsupported render mode: {mode}")
+
+    def close(self):
+        """Close the environment."""
+        if hasattr(self.env, 'close'):
+            self.env.close()
