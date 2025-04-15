@@ -4,13 +4,17 @@ from dm_control import suite
 import collections
 
 class DMCWrapper(gym.Env):
-    """Wrapper for humanoid standing with focus on head height and feet on ground."""
+    """Wrapper for humanoid standing with focus on head height, feet on ground, and right arm waving."""
 
     def __init__(self, domain_name="humanoid", task_name="stand",
                  max_steps=1000, seed=None, 
                  lying_down_threshold=30,  # Number of steps before terminating when lying down
                  init_randomization=0.05,   # Amount of randomization in initial pose (0-1)
-                 action_smoothing=0.2):     # Amount of action smoothing (0-1)
+                 action_smoothing=0.2,      # Amount of action smoothing (0-1)
+                 wave_amplitude=0.5,        # Amplitude of the desired arm wave
+                 wave_frequency=1.0,        # Frequency of the arm wave (cycles per second)
+                 wave_reward_weight=0.8,    # Weight of the arm waving reward
+                 time_reward_scale=0.002):  # Scale factor for time-based reward increase
 
         # Load the environment
         random_state = np.random.RandomState(seed) if seed is not None else None
@@ -56,17 +60,98 @@ class DMCWrapper(gym.Env):
         # Track previous height for velocity calculation
         self.prev_height = None
         
-        # New: For action smoothing
+        # For action smoothing
         self.action_smoothing = action_smoothing
         self.last_action = None
         
-        # New: For observation normalization
+        # For observation normalization
         self.obs_running_mean = None
         self.obs_running_var = None
         self.obs_epsilon = 1e-8
         
-        # New: For recovery reward
+        # For recovery reward
         self.was_falling = False
+        
+        # New: For arm waving
+        self.wave_amplitude = wave_amplitude
+        self.wave_frequency = wave_frequency
+        self.wave_reward_weight = wave_reward_weight
+        self.wave_time = 0.0
+        
+        # New: For time-based reward
+        self.time_reward_scale = time_reward_scale
+        self.standing_time = 0  # Count steps agent has been standing
+        
+        # Try to identify the arm joints in the model
+        self.right_arm_joints = self._identify_right_arm_joints()
+        self.right_arm_joint_ids = self._get_right_arm_joint_ids()
+
+    def _identify_right_arm_joints(self):
+        """Identify the right arm joints for waving motion."""
+        # Common joint name patterns for right arm in humanoid models
+        right_arm_patterns = [
+            'right_shoulder', 'right_elbow', 'r_shoulder', 'r_elbow',
+            'right_arm', 'right_forearm', 'rshoulder', 'relbow'
+        ]
+        
+        identified_joints = []
+        
+        # Try to find joints matching these patterns
+        for i in range(self.env.physics.model.njnt):
+            joint_name = self.env.physics.model.id2name(i, 'joint')
+            if joint_name:
+                for pattern in right_arm_patterns:
+                    if pattern in joint_name.lower():
+                        identified_joints.append(joint_name)
+                        break
+        
+        if not identified_joints:
+            # If no matches found, try a different approach based on position
+            # This is a fallback and might not be accurate for all models
+            try:
+                # Try to identify shoulder joint based on torso connection
+                torso_id = self.env.physics.model.name2id('torso', 'body')
+                if torso_id != -1:
+                    for i in range(self.env.physics.model.njnt):
+                        if self.env.physics.model.jnt_bodyid[i] == torso_id:
+                            # Assumption: right arm connected to torso
+                            joint_name = self.env.physics.model.id2name(i, 'joint')
+                            if joint_name and ('right' in joint_name.lower() or '_r' in joint_name.lower()):
+                                identified_joints.append(joint_name)
+            except:
+                pass
+        
+        # If still no joints found, use generic indices (model-specific, may need adjustment)
+        if not identified_joints:
+            print("Warning: Could not identify right arm joints by name. Using generic indices.")
+            identified_joints = ['generic_right_shoulder', 'generic_right_elbow']
+            
+        return identified_joints
+
+    def _get_right_arm_joint_ids(self):
+        """Convert right arm joint names to joint indices in the model."""
+        joint_ids = []
+        
+        for joint_name in self.right_arm_joints:
+            if joint_name.startswith('generic_'):
+                # For generic joints, use estimated indices
+                # These are educated guesses for humanoid models
+                if joint_name == 'generic_right_shoulder':
+                    # Usually shoulder joints are early in the chain after root
+                    # This is highly model-dependent and may need adjustment
+                    joint_ids.append(10)  # Example index, adjust based on your model
+                elif joint_name == 'generic_right_elbow':
+                    joint_ids.append(11)  # Example index, adjust based on your model
+            else:
+                # For named joints, get the actual index
+                try:
+                    joint_id = self.env.physics.model.name2id(joint_name, 'joint')
+                    if joint_id != -1:
+                        joint_ids.append(joint_id)
+                except:
+                    print(f"Warning: Joint {joint_name} not found in model.")
+        
+        return joint_ids
 
     def _normalize_obs(self, obs):
         """Normalize observations using running statistics."""
@@ -95,7 +180,8 @@ class DMCWrapper(gym.Env):
     def reset(self, seed=None, options=None):
         """Reset the environment with a standard starting position."""
         if seed is not None:
-            super().reset(seed=seed)
+            if hasattr(super(), 'reset'):
+                super().reset(seed=seed)
             if hasattr(self.env._task, 'random'):
                 self.env._task.random.seed(seed)
 
@@ -120,6 +206,8 @@ class DMCWrapper(gym.Env):
         self.prev_height = self._get_height()
         self.last_action = None
         self.was_falling = False
+        self.wave_time = 0.0
+        self.standing_time = 0
 
         # Get initial observation and info
         obs = self._flatten_obs(time_step.observation)
@@ -131,7 +219,9 @@ class DMCWrapper(gym.Env):
         foot_heights = self._get_foot_heights()
         
         info = {'height': self._get_height(),
-                'foot_heights': foot_heights}
+                'foot_heights': foot_heights,
+                'right_arm_joints': self.right_arm_joints,
+                'right_arm_joint_ids': self.right_arm_joint_ids}
 
         return norm_obs.astype(np.float32), info
     
@@ -245,15 +335,19 @@ class DMCWrapper(gym.Env):
             qvel[:] = 0.0
 
     def step(self, action):
-        """Take a step with focus on head height and feet position."""
+        """Take a step with focus on head height, feet position, and right arm waving."""
         action = action.astype(np.float64)
         
-        # New: Apply action smoothing
+        # Apply action smoothing
         if self.last_action is not None and self.action_smoothing > 0:
             action = self.action_smoothing * self.last_action + (1 - self.action_smoothing) * action
         
         self.last_action = action.copy()
         
+        # Update wave time
+        self.wave_time += self.env.physics.timestep()
+        
+        # Take physics step
         time_step = self.env.step(action)
         self.steps_this_episode += 1
         
@@ -262,28 +356,42 @@ class DMCWrapper(gym.Env):
         # Normalize observation
         norm_obs = self._normalize_obs(obs_flat)
         
-        # New: Track previous falling state for recovery detection
+        # Track previous falling state for recovery detection
         self.was_falling = self.lying_down_steps > 5
         
-        # Calculate reward focused on head height and feet position
-        reward = self._compute_stand_reward()
+        # Get current height
+        current_height = self._get_height()
         
-        # New: Add recovery reward
+        # Update standing time counter
+        if current_height > 0.8:  # Consider "standing" if height is above 0.8
+            self.standing_time += 1
+        else:
+            self.standing_time = 0
+        
+        # Calculate reward focused on head height, feet position, and arm waving
+        stand_reward = self._compute_stand_reward()
+        
+        # Calculate arm waving reward
+        wave_reward = self._compute_wave_reward()
+        
+        # Calculate time-based reward (increases with standing duration)
+        time_reward = self._compute_time_reward()
+        
+        # Add recovery reward
         recovery_reward = 0
-        if self.was_falling and self._get_height() > 0.8:  # If was falling but now upright
+        if self.was_falling and current_height > 0.8:  # If was falling but now upright
             recovery_reward = 5.0  # Big bonus for recovery!
             print(f"Recovery bonus awarded: {recovery_reward}")
         
-        # Add recovery reward to total
-        reward += recovery_reward
+        # Combine all rewards
+        reward = stand_reward + wave_reward + time_reward + recovery_reward
         
         self.total_reward += reward
         
         # Determine if done
         terminated = time_step.last()
         
-        # Get current heights
-        current_height = self._get_height()
+        # Get foot heights
         foot_heights = self._get_foot_heights()
         
         # Early termination for falling
@@ -319,7 +427,11 @@ class DMCWrapper(gym.Env):
             'jump_detected': jump_detected,
             'total_reward': self.total_reward,
             'best_height': self.best_height_this_episode,
-            'recovery_reward': recovery_reward
+            'recovery_reward': recovery_reward,
+            'wave_reward': wave_reward,
+            'stand_reward': stand_reward,
+            'time_reward': time_reward,
+            'standing_time': self.standing_time
         }
         
         # Add final info for episode end
@@ -331,6 +443,7 @@ class DMCWrapper(gym.Env):
                 'steps': self.steps_this_episode,
                 'total_reward': self.total_reward,
                 'terminal_observation': norm_obs,
+                'standing_time': self.standing_time
             }
         
         # Ensure reward is a scalar
@@ -352,6 +465,73 @@ class DMCWrapper(gym.Env):
             return [float(left_foot_height), float(right_foot_height)]
         except:
             return [0.1, 0.1]  # Default if lookup fails
+    
+    def _get_right_arm_state(self):
+        """Get the current state of the right arm joints."""
+        arm_positions = []
+        arm_velocities = []
+        
+        # Try to get joint positions for recognized right arm joints
+        for joint_id in self.right_arm_joint_ids:
+            try:
+                # Get position (angle) of the joint
+                pos = self.env.physics.data.qpos[joint_id]
+                arm_positions.append(pos)
+                
+                # Get velocity of the joint
+                vel = self.env.physics.data.qvel[joint_id - 1]  # Adjust index for velocity
+                arm_velocities.append(vel)
+            except:
+                # If joint not found, use default values
+                arm_positions.append(0.0)
+                arm_velocities.append(0.0)
+        
+        return arm_positions, arm_velocities
+    
+    def _compute_wave_reward(self):
+        """Compute reward for waving the right arm."""
+        # Get target wave pattern (sinusoidal motion)
+        target_wave = self.wave_amplitude * np.sin(2 * np.pi * self.wave_frequency * self.wave_time)
+        
+        # Get current arm joint positions
+        arm_positions, arm_velocities = self._get_right_arm_state()
+        
+        if not arm_positions:
+            return 0.0  # No arm joints identified
+        
+        # Calculate wave reward based on how well the arm is following the desired wave pattern
+        wave_reward = 0.0
+        
+        # Focus on the first joint (shoulder) for primary wave motion
+        if len(arm_positions) > 0:
+            # Calculate difference between current position and target wave pattern
+            position_diff = abs(arm_positions[0] - target_wave)
+            # Reward is higher when difference is smaller (closer to target pattern)
+            position_match = max(0.0, 1.0 - position_diff / self.wave_amplitude)
+            wave_reward += position_match
+        
+        # Add component for appropriate velocity (should be aligned with wave direction)
+        if len(arm_velocities) > 0:
+            target_velocity = self.wave_amplitude * 2 * np.pi * self.wave_frequency * np.cos(2 * np.pi * self.wave_frequency * self.wave_time)
+            velocity_alignment = np.sign(arm_velocities[0]) == np.sign(target_velocity)
+            if velocity_alignment:
+                wave_reward += 0.5
+        
+        # Scale the wave reward by the specified weight
+        wave_reward *= self.wave_reward_weight
+        
+        return float(wave_reward)
+    
+    def _compute_time_reward(self):
+        """Compute time-based reward that increases the longer the agent stands."""
+        # Linear increase based on standing time
+        time_reward = self.time_reward_scale * self.standing_time
+        
+        # Cap the time reward to prevent it from dominating other rewards
+        max_time_reward = 2.0
+        time_reward = min(time_reward, max_time_reward)
+        
+        return float(time_reward)
             
     def _compute_stand_reward(self):
         """Improved reward function that balances height, orientation, feet position, and stability."""
@@ -413,20 +593,20 @@ class DMCWrapper(gym.Env):
         except:
             stability_reward = 0.0  # Default if we can't get angular velocity
             
-        # New: 5. Energy Efficiency Component
+        # 5. Energy Efficiency Component
         try:
             # Penalize excessive control force (encourage smoother, more efficient movements)
             energy_penalty = -0.1 * np.sum(np.square(physics.data.ctrl))
         except:
             energy_penalty = 0.0
         
-        # New: 6. Height Stability Reward (penalize oscillation)
+        # 6. Height Stability Reward (penalize oscillation)
         height_stability_reward = 0.0
         if self.prev_height is not None:
             height_velocity = abs(self._get_height() - self.prev_height) / physics.timestep()
             height_stability_reward = -0.3 * min(1.0, height_velocity)
             
-        # New: 7. ZMP (Zero Moment Point) Stability
+        # 7. ZMP (Zero Moment Point) Stability
         try:
             com_pos = physics.center_of_mass_position()
             com_vel = physics.center_of_mass_velocity()
@@ -459,9 +639,9 @@ class DMCWrapper(gym.Env):
             1.5 * upright_reward +        # Weight: 1.5
             1.0 * foot_reward +           # Weight: 1.0
             0.5 * stability_reward +      # Weight: 0.5
-            energy_penalty +              # New: penalize excessive force
-            height_stability_reward +     # New: reward stable height
-            zmp_reward                    # New: reward dynamic stability
+            energy_penalty +              # Penalize excessive force
+            height_stability_reward +     # Reward stable height
+            zmp_reward                    # Reward dynamic stability
         )
         
         # Ensure we return a scalar float
@@ -488,9 +668,4 @@ class DMCWrapper(gym.Env):
         elif mode == 'human':
             return self.env.physics.render(height=height, width=width, camera_id=camera_id)
         else:
-            raise ValueError(f"Unsupported render mode: {mode}")
-
-    def close(self):
-        """Close the environment."""
-        if hasattr(self.env, 'close'):
-            self.env.close()
+            raise ValueError(
