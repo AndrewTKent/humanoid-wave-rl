@@ -11,6 +11,7 @@ import numpy as np
 from datetime import datetime
 import wandb
 from typing import Callable
+import re
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
@@ -166,6 +167,12 @@ def parse_args():
     parser.add_argument('--wandb', action='store_true',
                        help='Enable wandb logging')
     
+    # Resume training
+    parser.add_argument('--resume_from', type=str, default=None,
+                       help='Path to a saved model to resume training from')
+    parser.add_argument('--wandb_id', type=str, default=None,
+                       help='Wandb run ID to resume tracking')
+    
     # Environment settings
     parser.add_argument('--max_steps', type=int, default=1000,
                        help='Maximum steps per episode')
@@ -200,7 +207,7 @@ def parse_args():
                        help='Network architecture as a Python list of layer sizes')
     
     return parser.parse_args()
-    
+
 
 def make_env(rank: int, seed: int = 0, max_steps=1000):
     """Utility function for creating environments for parallel running."""
@@ -223,14 +230,19 @@ def train_humanoid_stand(args):
     num_envs = args.num_envs
     device = args.device
     use_wandb = args.wandb
+    resume_from = args.resume_from
     
-    # Create timestamp for this run
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Base path for saving results
-    base_path = os.path.join(output_dir, f"ppo_humanoid_{timestamp}")
-    os.makedirs(base_path, exist_ok=True)
-    print(f"Results will be saved in: {base_path}")
+    # Determine base path - either from resume path or create a new one
+    if resume_from:
+        # Extract the directory from resume_from path
+        base_path = os.path.dirname(os.path.abspath(resume_from))
+        print(f"Resuming training in: {base_path}")
+    else:
+        # Create timestamp for new run
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_path = os.path.join(output_dir, f"ppo_humanoid_{timestamp}")
+        os.makedirs(base_path, exist_ok=True)
+        print(f"Results will be saved in: {base_path}")
     
     # Initialize wandb if requested
     if use_wandb:
@@ -242,9 +254,16 @@ def train_humanoid_stand(args):
             "n_steps": args.n_steps,
             "batch_size": args.batch_size,
             "net_arch": args.net_arch,
-            "max_steps": args.max_steps
+            "max_steps": args.max_steps,
+            "resumed_from": resume_from if resume_from else "None"
         }
-        wandb.init(project="humanoid-stand", config=wandb_config)
+        
+        wandb.init(
+            project="humanoid-stand", 
+            config=wandb_config,
+            id=args.wandb_id,
+            resume="allow" if args.wandb_id else None
+        )
     
     # Determine device
     if device == 'auto':
@@ -296,33 +315,65 @@ def train_humanoid_stand(args):
         print(f"Warning: Failed to parse network architecture. Using default [256, 256]")
         net_arch = [256, 256]
     
-    # Create the model
-    model = PPO(
-        "MlpPolicy",
-        env,
-        verbose=1,
-        learning_rate=lr_schedule,
-        n_steps=args.n_steps,
-        batch_size=args.batch_size,
-        n_epochs=args.n_epochs,
-        gamma=args.gamma,
-        ent_coef=args.ent_coef,
-        clip_range=clip_schedule,
-        device=device,
-        policy_kwargs={
-            "net_arch": net_arch,
-            "activation_fn": torch.nn.ReLU
-        }
-    )
+    # Create or load the model
+    if resume_from and os.path.exists(resume_from):
+        print(f"Resuming training from {resume_from}")
+        model = PPO.load(
+            resume_from,
+            env=env,
+            device=device
+        )
+        # Update learning rate and other parameters
+        model.learning_rate = lr_schedule
+        model.clip_range = clip_schedule
+    else:
+        print(f"Creating new model")
+        model = PPO(
+            "MlpPolicy",
+            env,
+            verbose=1,
+            learning_rate=lr_schedule,
+            n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
+            gamma=args.gamma,
+            ent_coef=args.ent_coef,
+            clip_range=clip_schedule,
+            device=device,
+            policy_kwargs={
+                "net_arch": net_arch,
+                "activation_fn": torch.nn.ReLU
+            }
+        )
     
     # Train the model
     print(f"Training for {total_timesteps} timesteps...")
     model.learn(total_timesteps=total_timesteps, callback=[checkpoint_callback, progress_callback])
     
+    # Extract timesteps from existing filename if resuming
+    if resume_from:
+        # Try to extract previous timesteps from filename
+        prev_timesteps = 0
+        filename = os.path.basename(resume_from)
+        match = re.search(r'(\d+)k', filename)
+        if match:
+            prev_timesteps = int(match.group(1)) * 1000
+        
+        # Calculate new total
+        new_total_timesteps = prev_timesteps + total_timesteps
+        timesteps_str = f"{new_total_timesteps//1000}k"
+    else:
+        timesteps_str = f"{total_timesteps//1000}k"
+    
     # Save the final model
-    final_model_path = os.path.join(base_path, "humanoid_final.zip")
+    final_model_path = os.path.join(base_path, f"humanoid_final_{timesteps_str}.zip")
     model.save(final_model_path)
     print(f"Model saved to {final_model_path}")
+    
+    # Also save as humanoid_final.zip for backward compatibility
+    compat_path = os.path.join(base_path, "humanoid_final.zip")
+    model.save(compat_path)
+    print(f"Model also saved to {compat_path} for compatibility")
     
     # Evaluate on a non-vectorized environment
     eval_env = DMCWrapper(
@@ -347,9 +398,9 @@ def train_humanoid_stand(args):
     # Record videos if possible
     try:
         print("Recording videos of the trained humanoid...")
-        video_path = os.path.join(base_path, f"humanoid_video_{total_timesteps//1000}k.mp4")
+        video_path = os.path.join(base_path, f"humanoid_video_{timesteps_str}.mp4")
         
-        render_cmd = f"xvfb-run -a python render_video.py --model_path {final_model_path} --output_path {video_path}"
+        render_cmd = f"MUJOCO_GL=egl python render_video.py --model_path {final_model_path} --output_path {video_path}"
         print(f"Executing: {render_cmd}")
         os.system(render_cmd)
         
@@ -400,7 +451,7 @@ def evaluate_trained_model(args):
         os.makedirs(args.output_dir, exist_ok=True)
         video_path = os.path.join(args.output_dir, f"humanoid_eval_{os.path.basename(args.model_path).replace('.zip','')}.mp4")
 
-        render_cmd = f"xvfb-run -a python render_video.py --model_path {args.model_path} --output_path {video_path} --max_steps {args.max_steps}"
+        render_cmd = f"MUJOCO_GL=egl python render_video.py --model_path {args.model_path} --output_path {video_path} --max_steps {args.max_steps}"
         print(f"Executing: {render_cmd}")
         os.system(render_cmd)
 
