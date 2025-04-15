@@ -319,30 +319,31 @@ def train_humanoid_stand(args):
     if resume_from and os.path.exists(resume_from):
         print(f"Resuming training from {resume_from}")
         
-        # Create a temporary copy of the model parameters
-        params_dict = {
-            "learning_rate": lr_schedule,
-            "n_steps": args.n_steps,
-            "batch_size": args.batch_size,
-            "n_epochs": args.n_epochs,
-            "gamma": args.gamma,
-            "ent_coef": args.ent_coef,
-            "clip_range": clip_schedule,
-            "device": device,
-            "policy_kwargs": {
+        # First, load just the saved model to get its policy
+        saved_model = PPO.load(resume_from, device=device)
+        
+        # Create a new model with all the parameters we want
+        model = PPO(
+            "MlpPolicy",
+            env,
+            verbose=1,
+            learning_rate=lr_schedule,
+            n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
+            gamma=args.gamma,
+            ent_coef=args.ent_coef,
+            clip_range=clip_schedule,
+            device=device,
+            policy_kwargs={
                 "net_arch": net_arch,
                 "activation_fn": torch.nn.ReLU
             }
-        }
-        
-        # Load model while forcing the new environment (fixes different num_envs)
-        model = PPO.load(
-            resume_from,
-            env=env,  # Force the new environment
-            device=device,
-            # Include other hyperparameters to override
-            **params_dict
         )
+        
+        # Copy the policy parameters from the saved model to the new one
+        model.policy.load_state_dict(saved_model.policy.state_dict())
+        del saved_model  # Free memory
     else:
         print(f"Creating new model")
         model = PPO(
