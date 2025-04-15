@@ -28,7 +28,7 @@ class ProgressCallback(BaseCallback):
     def __init__(self, total_timesteps, num_envs=1, verbose=0):
         super(ProgressCallback, self).__init__(verbose)
         self.total_timesteps = total_timesteps
-        self.last_percent = -0.1
+        self.last_percent = -0.01
         self.start_time = time.time()
         self.num_envs = num_envs
         self.current_episode_reward = np.zeros(num_envs)
