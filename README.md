@@ -46,7 +46,7 @@ python main.py
 xvfb-run -a python main.py --total_timesteps 3000000 --num_envs 24 --wandb --device cuda
 
 # Resume Training
-xvfb-run -a python main.py --total_timesteps 3000000 --num_envs 24 --wandb --device cuda
+xvfb-run -a python main.py --resume_from results/ppo_humanoid_20250415_162622/humanoid_final.zip --total_timesteps 5000000 --num_envs 325 --wandb --wandb_id gallant-energy-44 --device cpu
 ```
 
 ### Evaluation
