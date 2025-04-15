@@ -318,24 +318,33 @@ def train_humanoid_stand(args):
     # Create or load the model
     if resume_from and os.path.exists(resume_from):
         print(f"Resuming training from {resume_from}")
+        # Load model but don't set the env yet to avoid issues
         model = PPO.load(
             resume_from,
-            env=env,
+            env=None,  # Don't set env yet
             device=device
         )
         
-        # FIX: Properly handle learning_rate and clip_range for resumed models
+        # Set environment after loading
+        model.set_env(env)
+        
+        # IMPORTANT FIX: Override the clip_range with the correct type
+        # Handle PPO's clip_range correctly whether it's a float or a schedule
         if args.use_linear_schedule:
-            # For schedules, we need to replace the values with callables
-            model.learning_rate = lr_schedule
-            # Replace the float clip_range with the schedule function
+            # Use a class attribute to store the original value and replace with schedule
+            model._original_clip_range = model.clip_range
             model.clip_range = clip_schedule
         else:
-            # For constant values, just update the values
-            model.learning_rate = args.learning_rate
-            # Make sure clip_range is a float
+            # Make sure it's a float value
             if callable(model.clip_range):
+                model._original_clip_range = model.clip_range
                 model.clip_range = 0.2
+        
+        # Similarly for learning rate
+        if args.use_linear_schedule:
+            model.learning_rate = lr_schedule
+        else:
+            model.learning_rate = args.learning_rate
     else:
         print(f"Creating new model")
         model = PPO(
