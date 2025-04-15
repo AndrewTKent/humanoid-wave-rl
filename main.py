@@ -323,9 +323,19 @@ def train_humanoid_stand(args):
             env=env,
             device=device
         )
-        # Update learning rate and other parameters
-        model.learning_rate = lr_schedule
-        model.clip_range = clip_schedule
+        
+        # FIX: Properly handle learning_rate and clip_range for resumed models
+        if args.use_linear_schedule:
+            # For schedules, we need to replace the values with callables
+            model.learning_rate = lr_schedule
+            # Replace the float clip_range with the schedule function
+            model.clip_range = clip_schedule
+        else:
+            # For constant values, just update the values
+            model.learning_rate = args.learning_rate
+            # Make sure clip_range is a float
+            if callable(model.clip_range):
+                model.clip_range = 0.2
     else:
         print(f"Creating new model")
         model = PPO(
