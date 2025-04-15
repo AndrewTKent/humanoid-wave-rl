@@ -44,6 +44,9 @@ python main.py
 
 # Train with custom settings
 xvfb-run -a python main.py --total_timesteps 3000000 --num_envs 24 --wandb --device cuda
+
+# Resume Training
+xvfb-run -a python main.py --total_timesteps 3000000 --num_envs 24 --wandb --device cuda
 ```
 
 ### Evaluation
