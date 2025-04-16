@@ -110,19 +110,3 @@ The reward function combines:
    - Rewards oscillatory movement when the arm is elevated
    - Uses curriculum learning to balance standing and waving
 
-## Design Decisions
-
-1. **Right Arm Joint Selection**: Joints 5-7 were selected based on experimental observation of the humanoid model. These appear to control shoulder and elbow movement.
-
-2. **Curriculum Learning**: The waving reward is gradually introduced after the agent learns to stand, using a progress factor that increases over time.
-
-3. **Wave Definition**: A "wave" is defined as oscillatory movement of the arm while it's held in an elevated position.
-
-4. **Parallel Training**: Using multiple environments in parallel significantly speeds up training.
-
-## Results
-
-After training for approximately 1 million timesteps, the agent successfully:
-- Stands up and maintains balance
-- Raises its right arm
-- Performs a consistent waving motion
