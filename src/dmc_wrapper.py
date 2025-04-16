@@ -14,7 +14,7 @@ class DMCWrapper(gym.Env):
                  action_smoothing=0.2,
                  wave_amplitude=0.5,
                  wave_frequency=1.0,
-                 wave_reward_weight=0.8,
+                 wave_reward_weight=1.2,  # Increased from 0.8 for stronger waving reward
                  time_reward_scale=0.002):
 
         random_state = np.random.RandomState(seed) if seed is not None else None
@@ -66,6 +66,7 @@ class DMCWrapper(gym.Env):
         self.was_falling = False
         self.wave_time = 0.0
         self.standing_time = 0
+        self.wave_cycles_completed = 0  # Track completed wave cycles
         
         # Observation normalization
         self.obs_running_mean = None
@@ -75,6 +76,10 @@ class DMCWrapper(gym.Env):
         # Arm joints identification
         self.right_arm_joints = self._identify_right_arm_joints()
         self.right_arm_joint_ids = self._get_right_arm_joint_ids()
+        
+        # Debug output for joint identification
+        print(f"Identified right arm joints: {self.right_arm_joints}")
+        print(f"Corresponding joint IDs: {self.right_arm_joint_ids}")
 
     def _identify_right_arm_joints(self):
         """Identify the right arm joints for waving motion."""
@@ -185,6 +190,7 @@ class DMCWrapper(gym.Env):
         self.was_falling = False
         self.wave_time = 0.0
         self.standing_time = 0
+        self.wave_cycles_completed = 0
 
         # Process observation
         obs = self._flatten_obs(time_step.observation)
@@ -201,7 +207,7 @@ class DMCWrapper(gym.Env):
         return norm_obs.astype(np.float32), info
     
     def _apply_standing_position(self, qpos, qvel, randomize=0.0):
-        """Set the humanoid in a stable standing position."""
+        """Set the humanoid in a stable standing position with vertical legs."""
         # Set height
         target_height = 1.35
         qpos[2] = target_height
@@ -250,36 +256,56 @@ class DMCWrapper(gym.Env):
                 except:
                     pass
             
-            # Set knee bend
+            # Set knee bend - increased for more natural stance
             for idx in knee_indices:
                 if idx >= 0:
-                    base_knee_angle = 0.1
+                    base_knee_angle = 0.25  # Increased from 0.1 for more natural bend
                     if randomize > 0.0:
                         knee_random = randomize * 0.05 * np.random.random()
                         qpos[joint_indices][idx] = base_knee_angle + knee_random
                     else:
                         qpos[joint_indices][idx] = base_knee_angle
             
-            # Set hip flexion
+            # Set hip flexion - reduced for more vertical legs
             for idx in hip_indices:
                 if idx >= 0:
                     if 'hip_y' in self.env.physics.model.id2name(idx+7, 'joint'):
-                        base_hip_angle = 0.05
+                        base_hip_angle = 0.02  # Reduced from 0.05 for more vertical stance
                         if randomize > 0.0:
-                            hip_random = randomize * 0.03 * (np.random.random() - 0.5)
+                            hip_random = randomize * 0.01 * (np.random.random() - 0.5)
                             qpos[joint_indices][idx] = base_hip_angle + hip_random
                         else:
                             qpos[joint_indices][idx] = base_hip_angle
             
-            # Set ankle flexion
+            # Set ankle flexion - adjusted for stability
             for idx in ankle_indices:
                 if idx >= 0:
-                    base_ankle_angle = -0.05
+                    base_ankle_angle = -0.08  # Adjusted from -0.05 for better balance
                     if randomize > 0.0:
-                        ankle_random = randomize * 0.03 * (np.random.random() - 0.5)
+                        ankle_random = randomize * 0.02 * (np.random.random() - 0.5)
                         qpos[joint_indices][idx] = base_ankle_angle + ankle_random
                     else:
                         qpos[joint_indices][idx] = base_ankle_angle
+            
+            # Initialize arm positions for easier waving
+            for joint_name in self.right_arm_joints:
+                if not joint_name.startswith('generic_'):
+                    try:
+                        joint_id = self.env.physics.model.name2id(joint_name, 'joint')
+                        if joint_id != -1:
+                            # Start with arm slightly raised
+                            if 'shoulder' in joint_name:
+                                qpos[joint_id] = 0.3  # Slight outward angle
+                            elif 'elbow' in joint_name:
+                                qpos[joint_id] = 0.1  # Slight bend
+                    except:
+                        pass
+                elif joint_name == 'generic_right_shoulder':
+                    try:
+                        if len(self.right_arm_joint_ids) > 0:
+                            qpos[self.right_arm_joint_ids[0]] = 0.3  # Generic joint position
+                    except:
+                        pass
             
             # Add diverse pose randomization
             if randomize > 0.1:
@@ -287,7 +313,7 @@ class DMCWrapper(gym.Env):
                 qpos[all_joints] += randomize * 0.1 * np.random.randn(len(qpos[all_joints]))
         
         except Exception as e:
-            pass
+            print(f"Exception in standing position setup: {e}")
         
         # Set velocities
         if randomize > 0.0:
@@ -371,7 +397,8 @@ class DMCWrapper(gym.Env):
             'wave_reward': wave_reward,
             'stand_reward': stand_reward,
             'time_reward': time_reward,
-            'standing_time': self.standing_time
+            'standing_time': self.standing_time,
+            'wave_cycles': self.wave_cycles_completed
         }
         
         # Add final info for episode end
@@ -383,7 +410,8 @@ class DMCWrapper(gym.Env):
                 'steps': self.steps_this_episode,
                 'total_reward': self.total_reward,
                 'terminal_observation': norm_obs,
-                'standing_time': self.standing_time
+                'standing_time': self.standing_time,
+                'wave_cycles': self.wave_cycles_completed
             }
         
         return norm_obs, float(reward), terminated, truncated, info
@@ -422,7 +450,7 @@ class DMCWrapper(gym.Env):
         return arm_positions, arm_velocities
     
     def _compute_wave_reward(self):
-        """Calculate reward for arm waving behavior."""
+        """Calculate reward for arm waving behavior using improved bell-curve rewards."""
         # Target sinusoidal pattern
         target_wave = self.wave_amplitude * np.sin(2 * np.pi * self.wave_frequency * self.wave_time)
         
@@ -434,18 +462,31 @@ class DMCWrapper(gym.Env):
         
         wave_reward = 0.0
         
-        # Position matching component
+        # Position matching component - Using bell curve for smoother rewards
         if len(arm_positions) > 0:
             position_diff = abs(arm_positions[0] - target_wave)
-            position_match = max(0.0, 1.0 - position_diff / self.wave_amplitude)
-            wave_reward += position_match
+            # Bell curve reward instead of linear
+            position_match = np.exp(-position_diff**2 / (2 * (self.wave_amplitude/2)**2))
+            wave_reward += 2.0 * position_match  # Weighted more heavily
         
-        # Velocity alignment component
+        # Velocity alignment component - More important for natural motion
         if len(arm_velocities) > 0:
             target_velocity = self.wave_amplitude * 2 * np.pi * self.wave_frequency * np.cos(2 * np.pi * self.wave_frequency * self.wave_time)
-            velocity_alignment = np.sign(arm_velocities[0]) == np.sign(target_velocity)
-            if velocity_alignment:
-                wave_reward += 0.5
+            # Velocity match using bell curve
+            velocity_diff = abs(arm_velocities[0] - target_velocity)
+            velocity_match = np.exp(-velocity_diff**2 / (2 * (self.wave_amplitude * self.wave_frequency)**2))
+            wave_reward += 1.5 * velocity_match
+        
+        # Add bonus for completing wave cycles
+        cycle_position = (self.wave_time * self.wave_frequency) % 1.0
+        if 0.48 < cycle_position < 0.52:  # At peak or trough of wave
+            wave_reward += 0.5  # Bonus for completing half cycles
+            
+            # Track full wave cycles
+            prev_cycles = int((self.wave_time - self.env.physics.timestep()) * self.wave_frequency)
+            current_cycles = int(self.wave_time * self.wave_frequency)
+            if current_cycles > prev_cycles:
+                self.wave_cycles_completed += 1
         
         return float(wave_reward * self.wave_reward_weight)
     
@@ -528,8 +569,29 @@ class DMCWrapper(gym.Env):
             zmp_reward = -0.5 * min(1.0, zmp_dist)
         except:
             zmp_reward = 0.0
+            
+        # NEW: Reward for vertical legs
+        vertical_legs_reward = 0.0
+        try:
+            leg_joints = ['left_hip', 'right_hip', 'left_knee', 'right_knee']
+            leg_angles = []
+            
+            for joint_name in leg_joints:
+                for j_name in self.env.physics.named.data.qpos.axes.row.names:
+                    if joint_name in j_name:
+                        idx = self.env.physics.named.data.qpos.axes.row.names.index(j_name)
+                        angle = abs(self.env.physics.data.qpos[idx])
+                        leg_angles.append(angle)
+            
+            if leg_angles:
+                # Smaller angles mean more vertical legs
+                avg_angle = sum(leg_angles) / len(leg_angles)
+                vertical_legs_reward = 1.0 - min(1.0, avg_angle / 0.5)
+            
+        except Exception as e:
+            pass
         
-        # Combined reward
+        # Combined reward with added vertical legs component
         combined_reward = (
             2.0 * height_reward +
             1.5 * upright_reward +
@@ -537,7 +599,8 @@ class DMCWrapper(gym.Env):
             0.5 * stability_reward +
             energy_penalty +
             height_stability_reward +
-            zmp_reward
+            zmp_reward +
+            1.5 * vertical_legs_reward  # New component for vertical legs
         )
         
         return float(combined_reward)
