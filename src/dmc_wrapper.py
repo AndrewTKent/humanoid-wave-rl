@@ -10,11 +10,11 @@ class DMCWrapper(gym.Env):
     def __init__(self, domain_name="humanoid", task_name="stand",
                  max_steps=1000, seed=None, 
                  lying_down_threshold=30,
-                 init_randomization=0.05,
+                 init_randomization=0.02,
                  action_smoothing=0.2,
-                 wave_amplitude=0.5,
-                 wave_frequency=1.0,
-                 wave_reward_weight=1.2,  # Increased from 0.8 for stronger waving reward
+                 wave_amplitude=0.7, 
+                 wave_frequency=0.5,  
+                 wave_reward_weight=1.2,
                  time_reward_scale=0.002):
 
         random_state = np.random.RandomState(seed) if seed is not None else None
@@ -66,7 +66,7 @@ class DMCWrapper(gym.Env):
         self.was_falling = False
         self.wave_time = 0.0
         self.standing_time = 0
-        self.wave_cycles_completed = 0  # Track completed wave cycles
+        self.wave_cycles_completed = 0
         
         # Observation normalization
         self.obs_running_mean = None
@@ -77,9 +77,16 @@ class DMCWrapper(gym.Env):
         self.right_arm_joints = self._identify_right_arm_joints()
         self.right_arm_joint_ids = self._get_right_arm_joint_ids()
         
-        # Debug output for joint identification
+        # Identify knee and hip joints for posture rewards
+        self.knee_joints = ['left_knee', 'right_knee']
+        self.hip_joints = ['left_hip_y', 'right_hip_y']
+        self.knee_joint_ids = [self.env.physics.model.name2id(j, 'joint') for j in self.knee_joints if self.env.physics.model.name2id(j, 'joint') != -1]
+        self.hip_joint_ids = [self.env.physics.model.name2id(j, 'joint') for j in self.hip_joints if self.env.physics.model.name2id(j, 'joint') != -1]
+
         print(f"Identified right arm joints: {self.right_arm_joints}")
         print(f"Corresponding joint IDs: {self.right_arm_joint_ids}")
+        print(f"Identified knee joints: {self.knee_joints}")
+        print(f"Identified hip joints: {self.hip_joints}")
 
     def _identify_right_arm_joints(self):
         """Identify the right arm joints for waving motion."""
@@ -89,8 +96,6 @@ class DMCWrapper(gym.Env):
         ]
         
         identified_joints = []
-        
-        # Pattern matching approach
         for i in range(self.env.physics.model.njnt):
             joint_name = self.env.physics.model.id2name(i, 'joint')
             if joint_name:
@@ -99,20 +104,6 @@ class DMCWrapper(gym.Env):
                         identified_joints.append(joint_name)
                         break
         
-        # Position-based fallback approach
-        if not identified_joints:
-            try:
-                torso_id = self.env.physics.model.name2id('torso', 'body')
-                if torso_id != -1:
-                    for i in range(self.env.physics.model.njnt):
-                        if self.env.physics.model.jnt_bodyid[i] == torso_id:
-                            joint_name = self.env.physics.model.id2name(i, 'joint')
-                            if joint_name and ('right' in joint_name.lower() or '_r' in joint_name.lower()):
-                                identified_joints.append(joint_name)
-            except:
-                pass
-        
-        # Generic fallback if no joints found
         if not identified_joints:
             print("Warning: Could not identify right arm joints by name. Using generic indices.")
             identified_joints = ['generic_right_shoulder', 'generic_right_elbow']
@@ -122,16 +113,13 @@ class DMCWrapper(gym.Env):
     def _get_right_arm_joint_ids(self):
         """Convert right arm joint names to model joint indices."""
         joint_ids = []
-        
         for joint_name in self.right_arm_joints:
             if joint_name.startswith('generic_'):
-                # Use estimated indices for generic joints
                 if joint_name == 'generic_right_shoulder':
                     joint_ids.append(10)
                 elif joint_name == 'generic_right_elbow':
                     joint_ids.append(11)
             else:
-                # Get actual index for named joints
                 try:
                     joint_id = self.env.physics.model.name2id(joint_name, 'joint')
                     if joint_id != -1:
@@ -173,14 +161,12 @@ class DMCWrapper(gym.Env):
 
         time_step = self.env.reset()
 
-        # Apply custom standing position
         with self.env.physics.reset_context():
             qpos = self.env.physics.data.qpos.copy()
             qvel = self.env.physics.data.qvel.copy()
             self._apply_standing_position(qpos, qvel, randomize=self.init_randomization)
             self.env.physics.set_state(np.concatenate([qpos, qvel]))
 
-        # Reset state variables
         self.steps_this_episode = 0
         self.best_height_this_episode = self._get_height()
         self.total_reward = 0.0
@@ -192,7 +178,6 @@ class DMCWrapper(gym.Env):
         self.standing_time = 0
         self.wave_cycles_completed = 0
 
-        # Process observation
         obs = self._flatten_obs(time_step.observation)
         norm_obs = self._normalize_obs(obs)
         foot_heights = self._get_foot_heights()
@@ -208,114 +193,84 @@ class DMCWrapper(gym.Env):
     
     def _apply_standing_position(self, qpos, qvel, randomize=0.0):
         """Set the humanoid in a stable standing position with vertical legs."""
-        # Set height
         target_height = 1.35
         qpos[2] = target_height
         
-        # Set orientation
         if randomize > 0.0:
-            # Add slight randomization for robustness
             w = 1.0 - randomize * 0.1 * np.random.random()
             x = randomize * 0.1 * (np.random.random() - 0.5)
             y = randomize * 0.1 * (np.random.random() - 0.5)
             z = randomize * 0.2 * (np.random.random() - 0.5)
-            
             norm = np.sqrt(w*w + x*x + y*y + z*z)
             qpos[3:7] = [w/norm, x/norm, y/norm, z/norm]
         else:
-            qpos[3:7] = [1.0, 0.0, 0.0, 0.0]  # Perfect upright
+            qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
         
-        # Set joint positions
         joint_indices = slice(7, len(qpos))
-        qpos[joint_indices] = 0.0  # Zero all joints initially
+        qpos[joint_indices] = 0.0
         
         try:
-            # Configure key joints for stability
             knee_indices = [self.env.physics.model.name2id('left_knee', 'joint'),
                           self.env.physics.model.name2id('right_knee', 'joint')]
             knee_indices = [i-7 for i in knee_indices if i != -1]
             
-            # Find hip joints
             hip_indices = []
             for joint_name in ['left_hip_x', 'left_hip_y', 'left_hip_z', 
                               'right_hip_x', 'right_hip_y', 'right_hip_z']:
-                try:
-                    idx = self.env.physics.model.name2id(joint_name, 'joint')
-                    if idx != -1:
-                        hip_indices.append(idx-7)
-                except:
-                    pass
+                idx = self.env.physics.model.name2id(joint_name, 'joint')
+                if idx != -1:
+                    hip_indices.append(idx-7)
             
-            # Find ankle joints
             ankle_indices = []
             for joint_name in ['left_ankle', 'right_ankle']:
-                try:
-                    idx = self.env.physics.model.name2id(joint_name, 'joint')
-                    if idx != -1:
-                        ankle_indices.append(idx-7)
-                except:
-                    pass
+                idx = self.env.physics.model.name2id(joint_name, 'joint')
+                if idx != -1:
+                    ankle_indices.append(idx-7)
             
-            # Set knee bend - increased for more natural stance
+            # Set knee bend to a natural angle
             for idx in knee_indices:
                 if idx >= 0:
-                    base_knee_angle = 0.25  # Increased from 0.1 for more natural bend
+                    base_knee_angle = 0.2  # Adjusted for natural bend
                     if randomize > 0.0:
                         knee_random = randomize * 0.05 * np.random.random()
                         qpos[joint_indices][idx] = base_knee_angle + knee_random
                     else:
                         qpos[joint_indices][idx] = base_knee_angle
             
-            # Set hip flexion - reduced for more vertical legs
+            # Set hip flexion for vertical legs
             for idx in hip_indices:
                 if idx >= 0:
                     if 'hip_y' in self.env.physics.model.id2name(idx+7, 'joint'):
-                        base_hip_angle = 0.02  # Reduced from 0.05 for more vertical stance
+                        base_hip_angle = 0.0  # Vertical stance
                         if randomize > 0.0:
                             hip_random = randomize * 0.01 * (np.random.random() - 0.5)
                             qpos[joint_indices][idx] = base_hip_angle + hip_random
                         else:
                             qpos[joint_indices][idx] = base_hip_angle
             
-            # Set ankle flexion - adjusted for stability
+            # Set ankle flexion
             for idx in ankle_indices:
                 if idx >= 0:
-                    base_ankle_angle = -0.08  # Adjusted from -0.05 for better balance
+                    base_ankle_angle = -0.08
                     if randomize > 0.0:
                         ankle_random = randomize * 0.02 * (np.random.random() - 0.5)
                         qpos[joint_indices][idx] = base_ankle_angle + ankle_random
                     else:
                         qpos[joint_indices][idx] = base_ankle_angle
             
-            # Initialize arm positions for easier waving
+            # Initialize arm positions
             for joint_name in self.right_arm_joints:
                 if not joint_name.startswith('generic_'):
-                    try:
-                        joint_id = self.env.physics.model.name2id(joint_name, 'joint')
-                        if joint_id != -1:
-                            # Start with arm slightly raised
-                            if 'shoulder' in joint_name:
-                                qpos[joint_id] = 0.3  # Slight outward angle
-                            elif 'elbow' in joint_name:
-                                qpos[joint_id] = 0.1  # Slight bend
-                    except:
-                        pass
-                elif joint_name == 'generic_right_shoulder':
-                    try:
-                        if len(self.right_arm_joint_ids) > 0:
-                            qpos[self.right_arm_joint_ids[0]] = 0.3  # Generic joint position
-                    except:
-                        pass
-            
-            # Add diverse pose randomization
-            if randomize > 0.1:
-                all_joints = slice(7, len(qpos))
-                qpos[all_joints] += randomize * 0.1 * np.random.randn(len(qpos[all_joints]))
+                    joint_id = self.env.physics.model.name2id(joint_name, 'joint')
+                    if joint_id != -1:
+                        if 'shoulder' in joint_name:
+                            qpos[joint_id] = 0.3
+                        elif 'elbow' in joint_name:
+                            qpos[joint_id] = 0.1
         
         except Exception as e:
             print(f"Exception in standing position setup: {e}")
         
-        # Set velocities
         if randomize > 0.0:
             qvel[:] = randomize * 0.01 * np.random.randn(*qvel.shape)
         else:
@@ -325,66 +280,53 @@ class DMCWrapper(gym.Env):
         """Take a step through the environment."""
         action = action.astype(np.float64)
         
-        # Apply action smoothing
         if self.last_action is not None and self.action_smoothing > 0:
             action = self.action_smoothing * self.last_action + (1 - self.action_smoothing) * action
         
         self.last_action = action.copy()
         self.wave_time += self.env.physics.timestep()
         
-        # Execute physics step
         time_step = self.env.step(action)
         self.steps_this_episode += 1
         
-        # Process observation
         obs_flat = self._flatten_obs(time_step.observation).astype(np.float32)
         norm_obs = self._normalize_obs(obs_flat)
         
-        # Track state
         self.was_falling = self.lying_down_steps > 5
         current_height = self._get_height()
         
-        # Update standing time
         if current_height > 0.8:
             self.standing_time += 1
         else:
             self.standing_time = 0
         
-        # Calculate reward components
         stand_reward = self._compute_stand_reward()
         wave_reward = self._compute_wave_reward()
         time_reward = self._compute_time_reward()
         
-        # Recovery bonus
         recovery_reward = 0
         if self.was_falling and current_height > 0.8:
             recovery_reward = 5.0
         
-        # Total reward
         reward = stand_reward + wave_reward + time_reward + recovery_reward
         self.total_reward += reward
         
-        # Termination conditions
         terminated = time_step.last()
         foot_heights = self._get_foot_heights()
         
-        # Check for falling
         if current_height < 0.3:
             self.lying_down_steps += 1
         else:
             self.lying_down_steps = 0
             
-        # Early termination
         fall_terminated = self.lying_down_steps >= self.lying_down_threshold
         terminated = terminated or fall_terminated
         truncated = self.steps_this_episode >= self.max_steps
         
-        # Track max height
         if current_height > self.best_height_this_episode:
             self.best_height_this_episode = current_height
         self.prev_height = current_height
             
-        # Prepare info
         info = {
             'height': current_height,
             'foot_heights': foot_heights,
@@ -401,7 +343,6 @@ class DMCWrapper(gym.Env):
             'wave_cycles': self.wave_cycles_completed
         }
         
-        # Add final info for episode end
         if terminated or truncated:
             info['final_info'] = {
                 'height': current_height,
@@ -440,7 +381,6 @@ class DMCWrapper(gym.Env):
             try:
                 pos = self.env.physics.data.qpos[joint_id]
                 arm_positions.append(pos)
-                
                 vel = self.env.physics.data.qvel[joint_id - 1]
                 arm_velocities.append(vel)
             except:
@@ -450,39 +390,34 @@ class DMCWrapper(gym.Env):
         return arm_positions, arm_velocities
     
     def _compute_wave_reward(self):
-        """Calculate reward for arm waving behavior using improved bell-curve rewards."""
-        # Target sinusoidal pattern
-        target_wave = self.wave_amplitude * np.sin(2 * np.pi * self.wave_frequency * self.wave_time)
-        
-        # Get current arm state
+        """Calculate reward for arm waving behavior."""
         arm_positions, arm_velocities = self._get_right_arm_state()
         
-        if not arm_positions:
-            return 0.0
-        
-        wave_reward = 0.0
-        
-        # Position matching component - Using bell curve for smoother rewards
-        if len(arm_positions) > 0:
-            position_diff = abs(arm_positions[0] - target_wave)
-            # Bell curve reward instead of linear
-            position_match = np.exp(-position_diff**2 / (2 * (self.wave_amplitude/2)**2))
-            wave_reward += 2.0 * position_match  # Weighted more heavily
-        
-        # Velocity alignment component - More important for natural motion
-        if len(arm_velocities) > 0:
-            target_velocity = self.wave_amplitude * 2 * np.pi * self.wave_frequency * np.cos(2 * np.pi * self.wave_frequency * self.wave_time)
-            # Velocity match using bell curve
-            velocity_diff = abs(arm_velocities[0] - target_velocity)
-            velocity_match = np.exp(-velocity_diff**2 / (2 * (self.wave_amplitude * self.wave_frequency)**2))
-            wave_reward += 1.5 * velocity_match
-        
-        # Add bonus for completing wave cycles
-        cycle_position = (self.wave_time * self.wave_frequency) % 1.0
-        if 0.48 < cycle_position < 0.52:  # At peak or trough of wave
-            wave_reward += 0.5  # Bonus for completing half cycles
+        if len(arm_positions) >= 2:
+            shoulder_pos = arm_positions[0]
+            elbow_pos = arm_positions[1]
             
-            # Track full wave cycles
+            target_shoulder = self.wave_amplitude * np.sin(2 * np.pi * self.wave_frequency * self.wave_time)
+            shoulder_diff = abs(shoulder_pos - target_shoulder)
+            shoulder_reward = np.exp(-shoulder_diff**2 / (2 * (self.wave_amplitude/2)**2))
+            
+            target_elbow = 0.3  # Slight bend for natural waving
+            elbow_diff = abs(elbow_pos - target_elbow)
+            elbow_reward = np.exp(-elbow_diff**2 / (0.1**2))
+            
+            wave_reward = 1.5 * shoulder_reward + 0.5 * elbow_reward
+            
+            if len(arm_velocities) >= 1:
+                target_shoulder_vel = self.wave_amplitude * 2 * np.pi * self.wave_frequency * np.cos(2 * np.pi * self.wave_frequency * self.wave_time)
+                shoulder_vel_diff = abs(arm_velocities[0] - target_shoulder_vel)
+                velocity_reward = np.exp(-shoulder_vel_diff**2 / (2 * (self.wave_amplitude * self.wave_frequency)**2))
+                wave_reward += 1.0 * velocity_reward
+        else:
+            wave_reward = 0.0
+        
+        cycle_position = (self.wave_time * self.wave_frequency) % 1.0
+        if 0.48 < cycle_position < 0.52:
+            wave_reward += 0.5
             prev_cycles = int((self.wave_time - self.env.physics.timestep()) * self.wave_frequency)
             current_cycles = int(self.wave_time * self.wave_frequency)
             if current_cycles > prev_cycles:
@@ -500,7 +435,6 @@ class DMCWrapper(gym.Env):
         """Calculate standing reward based on posture and stability."""
         physics = self.env.physics
         
-        # Height reward
         try:
             head_height = physics.named.data.geom_xpos['head', 'z']
         except:
@@ -515,19 +449,16 @@ class DMCWrapper(gym.Env):
             norm_height = max(0.0, min(1.0, norm_height))
             height_reward = 4.0 * (norm_height - 0.5)
         
-        # Orientation reward
         try:
             quat = physics.data.qpos[3:7]
             upright_reward = quat[0] ** 2
         except:
             upright_reward = 0.5
         
-        # Foot position reward
         foot_heights = self._get_foot_heights()
         foot_ground_contact = sum(1.0 for h in foot_heights if h < 0.1)
         foot_reward = 0.5 * (foot_ground_contact / len(foot_heights))
         
-        # Stability reward
         try:
             ang_vel = physics.data.qvel[3:6]
             ang_vel_norm = np.linalg.norm(ang_vel)
@@ -535,72 +466,56 @@ class DMCWrapper(gym.Env):
         except:
             stability_reward = 0.0
             
-        # Energy efficiency
         try:
             energy_penalty = -0.1 * np.sum(np.square(physics.data.ctrl))
         except:
             energy_penalty = 0.0
         
-        # Height stability
         height_stability_reward = 0.0
         if self.prev_height is not None:
             height_velocity = abs(self._get_height() - self.prev_height) / physics.timestep()
             height_stability_reward = -0.3 * min(1.0, height_velocity)
             
-        # Zero moment point stability
         try:
             com_pos = physics.center_of_mass_position()
             com_vel = physics.center_of_mass_velocity()
             gravity = 9.81
-            
-            foot_positions = []
-            try:
-                foot_positions.append(physics.named.data.geom_xpos['left_foot'])
-                foot_positions.append(physics.named.data.geom_xpos['right_foot'])
-            except:
-                foot_positions = [[0, 0, 0], [0, 0, 0]]
-                
+            foot_positions = [physics.named.data.geom_xpos['left_foot'],
+                             physics.named.data.geom_xpos['right_foot']]
             foot_center = np.mean(foot_positions, axis=0)
             
             zmp_x = com_pos[0] + com_vel[0] * np.sqrt(com_pos[2] / gravity)
             zmp_y = com_pos[1] + com_vel[1] * np.sqrt(com_pos[2] / gravity)
-            
             zmp_dist = np.sqrt((zmp_x - foot_center[0])**2 + (zmp_y - foot_center[1])**2)
             zmp_reward = -0.5 * min(1.0, zmp_dist)
         except:
             zmp_reward = 0.0
             
-        # NEW: Reward for vertical legs
-        vertical_legs_reward = 0.0
-        try:
-            leg_joints = ['left_hip', 'right_hip', 'left_knee', 'right_knee']
-            leg_angles = []
-            
-            for joint_name in leg_joints:
-                for j_name in self.env.physics.named.data.qpos.axes.row.names:
-                    if joint_name in j_name:
-                        idx = self.env.physics.named.data.qpos.axes.row.names.index(j_name)
-                        angle = abs(self.env.physics.data.qpos[idx])
-                        leg_angles.append(angle)
-            
-            if leg_angles:
-                # Smaller angles mean more vertical legs
-                avg_angle = sum(leg_angles) / len(leg_angles)
-                vertical_legs_reward = 1.0 - min(1.0, avg_angle / 0.5)
-            
-        except Exception as e:
-            pass
+        # Specific rewards for knee and hip angles
+        qpos = physics.data.qpos
+        knee_angles = [qpos[idx] for idx in self.knee_joint_ids if idx < len(qpos)]
+        hip_angles = [qpos[idx] for idx in self.hip_joint_ids if idx < len(qpos)]
         
-        # Combined reward with added vertical legs component
+        knee_target = 0.2
+        sigma_knee = 0.1
+        knee_rewards = [np.exp(- (angle - knee_target)**2 / sigma_knee**2) for angle in knee_angles]
+        avg_knee_reward = np.mean(knee_rewards) if knee_rewards else 0.0
+        
+        hip_target = 0.0
+        sigma_hip = 0.1
+        hip_rewards = [np.exp(- (angle - hip_target)**2 / sigma_hip**2) for angle in hip_angles]
+        avg_hip_reward = np.mean(hip_rewards) if hip_rewards else 0.0
+        
         combined_reward = (
             2.0 * height_reward +
-            1.5 * upright_reward +
+            2.0 * upright_reward +  # Increased for upright stance
             1.0 * foot_reward +
             0.5 * stability_reward +
             energy_penalty +
             height_stability_reward +
             zmp_reward +
-            1.5 * vertical_legs_reward  # New component for vertical legs
+            1.5 * avg_knee_reward +
+            1.5 * avg_hip_reward
         )
         
         return float(combined_reward)
